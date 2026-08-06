@@ -1,0 +1,1178 @@
+-- =============================================================
+-- Ultra AFK Optimizer V3.1 - Low Spike Plot Hide
+-- Low CPU + Low RAM Spike + Total Mute + Force Bright
+-- Hide World + Hide Crops + Hide Notifications
+-- =============================================================
+
+-- =============================================================
+-- CHỐNG CHẠY SCRIPT NHIỀU LẦN
+-- =============================================================
+
+local Environment = _G
+
+if getgenv then
+    local success, executorEnvironment = pcall(getgenv)
+
+    if success and type(executorEnvironment) == "table" then
+        Environment = executorEnvironment
+    end
+end
+
+if Environment.__ULTRA_AFK_OPTIMIZER_V3_PLOT_HIDE_LOADED then
+    return
+end
+
+Environment.__ULTRA_AFK_OPTIMIZER_V3_PLOT_HIDE_LOADED = true
+
+-- =============================================================
+-- SERVICES
+-- =============================================================
+
+local Lighting = game:GetService("Lighting")
+local Workspace = game:GetService("Workspace")
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local SoundService = game:GetService("SoundService")
+local CollectionService = game:GetService("CollectionService")
+
+local LocalPlayer = Players.LocalPlayer
+
+-- =============================================================
+-- CẤU HÌNH
+-- =============================================================
+
+local AGGRESSIVE_FREE = false
+local DISABLE_WORLD_TOUCH = false
+local DISABLE_WORLD_QUERY = false
+local SIMPLIFY_MATERIAL = false
+local REMOVE_MESH_TEXTURE = false
+
+local HIDE_ALL_CROPS = true
+local HIDE_WORLD_STRUCTURES = true
+local HIDE_PLOT_CONTENTS = true
+local KEEP_GROUND_VISIBLE = true
+local FORCE_TRANSPARENCY = false
+local CROP_REHIDE_INTERVAL = 30
+local WORLD_REHIDE_INTERVAL = 30
+local PLOT_RESCAN_INTERVAL = 30
+
+local MAX_OBJECTS_PER_FRAME = 8
+local MAX_TIME_PER_FRAME = 0.0005
+local MAX_QUEUE_SIZE = 300
+local FPS_CAP = 15
+
+-- =============================================================
+-- TỪ KHÓA NHẬN DIỆN CÂY TRỒNG
+-- =============================================================
+
+local CropKeywords = {
+    "plant", "plants", "planted", "planting",
+    "crop", "crops", "growable", "growing",
+    "harvest", "harvestable",
+    "carrot", "strawberry", "blueberry", "tomato",
+    "corn", "watermelon", "pumpkin", "apple",
+    "bamboo", "coconut", "cactus", "dragonfruit",
+    "dragon_fruit", "mango", "grape", "mushroom",
+    "pepper", "cacao", "bean", "pear", "peach",
+    "banana", "pineapple", "kiwi", "avocado",
+    "durian", "papaya", "lemon", "orange",
+    "cherry", "raspberry", "cranberry", "eggplant",
+    "onion", "potato", "rice", "wheat",
+    "sunflower", "rose", "tulip", "daffodil"
+}
+
+local CropTags = {
+    "Plant", "Plants", "Crop", "Crops",
+    "Harvestable", "Growable"
+}
+
+local CropAttributes = {
+    "IsPlant", "IsCrop", "PlantType", "CropType",
+    "SeedType", "GrowthStage", "GrowTime", "Harvestable"
+}
+
+-- =============================================================
+-- GIẢM ĐỒ HỌA
+-- =============================================================
+
+pcall(function()
+    if setfpscap then
+        setfpscap(FPS_CAP)
+    end
+end)
+
+pcall(function()
+    settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
+end)
+
+pcall(function()
+    Lighting.GlobalShadows = false
+    Lighting.Brightness = 2
+    Lighting.FogStart = 0
+    Lighting.FogEnd = 100000
+    Lighting.ExposureCompensation = 0
+    Lighting.EnvironmentDiffuseScale = 0
+    Lighting.EnvironmentSpecularScale = 0
+end)
+
+-- =============================================================
+-- CACHE YẾU
+-- =============================================================
+
+local CharacterCache = setmetatable({}, { __mode = "k" })
+local ImportantModelCache = setmetatable({}, { __mode = "k" })
+local OptimizedCache = setmetatable({}, { __mode = "k" })
+local QueuedCache = setmetatable({}, { __mode = "k" })
+local CropSignatureCache = setmetatable({}, { __mode = "k" })
+local CropVisualCache = setmetatable({}, { __mode = "k" })
+local WorldVisualCache = setmetatable({}, { __mode = "k" })
+local PlotVisualCache = setmetatable({}, { __mode = "k" })
+
+-- =============================================================
+-- NHẬN DIỆN CÂY TRỒNG
+-- =============================================================
+
+local function nameLooksLikeCrop(object)
+    if not object then
+        return false
+    end
+
+    local name = string.lower(object.Name)
+    local normalizedName = string.gsub(name, "[%s%-%.]", "_")
+
+    for index = 1, #CropKeywords do
+        if string.find(normalizedName, CropKeywords[index], 1, true) then
+            return true
+        end
+    end
+
+    return false
+end
+
+local function hasCropAttribute(object)
+    if not object then
+        return false
+    end
+
+    for index = 1, #CropAttributes do
+        local success, value = pcall(function()
+            return object:GetAttribute(CropAttributes[index])
+        end)
+
+        if success and value ~= nil and value ~= false then
+            return true
+        end
+    end
+
+    return false
+end
+
+local function hasCropTag(object)
+    if not object then
+        return false
+    end
+
+    for index = 1, #CropTags do
+        local success, tagged = pcall(function()
+            return CollectionService:HasTag(object, CropTags[index])
+        end)
+
+        if success and tagged then
+            return true
+        end
+    end
+
+    return false
+end
+
+local function hasCropSignature(object)
+    if not object then
+        return false
+    end
+
+    if CropSignatureCache[object] then
+        return true
+    end
+
+    if nameLooksLikeCrop(object)
+        or hasCropAttribute(object)
+        or hasCropTag(object) then
+
+        CropSignatureCache[object] = true
+        return true
+    end
+
+    return false
+end
+
+local function isCropRelated(object)
+    if not HIDE_ALL_CROPS or not object then
+        return false
+    end
+
+    if CropSignatureCache[object] then
+        return true
+    end
+
+    local current = object
+
+    while current and current ~= Workspace do
+        if hasCropSignature(current) then
+            CropSignatureCache[object] = true
+            return true
+        end
+
+        current = current.Parent
+    end
+
+    return false
+end
+
+local function hideCropVisual(object)
+    if not object or not object.Parent then
+        return
+    end
+
+    CropVisualCache[object] = true
+
+    if object:IsA("BasePart") then
+        pcall(function()
+            object.LocalTransparencyModifier = 1
+            if FORCE_TRANSPARENCY then
+                object.Transparency = 1
+            end
+            object.CastShadow = false
+            object.Reflectance = 0
+        end)
+
+    elseif object:IsA("Decal") or object:IsA("Texture") then
+        pcall(function()
+            object.Transparency = 1
+        end)
+
+    elseif object:IsA("ParticleEmitter")
+        or object:IsA("Trail")
+        or object:IsA("Beam")
+        or object:IsA("Smoke")
+        or object:IsA("Fire")
+        or object:IsA("Sparkles")
+        or object:IsA("Highlight") then
+
+        pcall(function()
+            object.Enabled = false
+        end)
+
+    elseif object:IsA("BillboardGui")
+        or object:IsA("SurfaceGui") then
+
+        pcall(function()
+            object.Enabled = false
+        end)
+    end
+end
+
+-- =============================================================
+-- ĐĂNG KÝ NHÂN VẬT
+-- =============================================================
+
+local function registerCharacter(character)
+    if not character then
+        return
+    end
+
+    CharacterCache[character] = true
+    ImportantModelCache[character] = true
+end
+
+local function registerPlayer(player)
+    if player.Character then
+        registerCharacter(player.Character)
+    end
+
+    player.CharacterAdded:Connect(registerCharacter)
+end
+
+for _, player in ipairs(Players:GetPlayers()) do
+    registerPlayer(player)
+end
+
+Players.PlayerAdded:Connect(registerPlayer)
+
+-- =============================================================
+-- KIỂM TRA MODEL QUAN TRỌNG
+-- =============================================================
+
+local function isImportantModel(model)
+    if not model then
+        return false
+    end
+
+    local cached = ImportantModelCache[model]
+
+    if cached ~= nil then
+        return cached
+    end
+
+    local important = false
+
+    if CharacterCache[model] then
+        important = true
+    elseif model:FindFirstChildOfClass("Humanoid") then
+        important = true
+    end
+
+    ImportantModelCache[model] = important
+    return important
+end
+
+local function isImportant(object)
+    if not object then
+        return false
+    end
+
+    if object:IsA("Tool")
+        or object:FindFirstAncestorWhichIsA("Tool") then
+        return true
+    end
+
+    local model = object:FindFirstAncestorWhichIsA("Model")
+
+    if model and isImportantModel(model) then
+        return true
+    end
+
+    local camera = Workspace.CurrentCamera
+
+    if camera then
+        if object == camera then
+            return true
+        end
+
+        local success, insideCamera = pcall(function()
+            return object:IsDescendantOf(camera)
+        end)
+
+        if success and insideCamera then
+            return true
+        end
+    end
+
+    return false
+end
+
+-- =============================================================
+-- KIỂM TRA LOẠI INSTANCE
+-- =============================================================
+
+local function shouldProcess(object)
+    if not object then
+        return false
+    end
+
+    local className = object.ClassName
+
+    return object:IsA("BasePart")
+        or className == "ParticleEmitter"
+        or className == "Trail"
+        or className == "Beam"
+        or className == "Smoke"
+        or className == "Fire"
+        or className == "Sparkles"
+        or className == "Highlight"
+        or className == "Decal"
+        or className == "Texture"
+        or className == "SurfaceAppearance"
+        or className == "BillboardGui"
+        or className == "SurfaceGui"
+        or className == "Sound"
+end
+
+local function isEffect(object)
+    if not object then
+        return false
+    end
+
+    local className = object.ClassName
+
+    return className == "ParticleEmitter"
+        or className == "Trail"
+        or className == "Beam"
+        or className == "Smoke"
+        or className == "Fire"
+        or className == "Sparkles"
+        or className == "Highlight"
+end
+
+-- =============================================================
+-- TẮT HIỆU ỨNG ÁNH SÁNG
+-- =============================================================
+
+local function removeLightingEffect(effect)
+    if not effect then
+        return
+    end
+
+    if effect:IsA("ColorCorrectionEffect")
+        or effect:IsA("Atmosphere")
+        or effect:IsA("BlurEffect")
+        or effect:IsA("SunRaysEffect")
+        or effect:IsA("BloomEffect")
+        or effect:IsA("DepthOfFieldEffect") then
+
+        pcall(function()
+            effect.Enabled = false
+        end)
+
+        pcall(function()
+            effect:Destroy()
+        end)
+    end
+end
+
+for _, effect in ipairs(Lighting:GetChildren()) do
+    removeLightingEffect(effect)
+end
+
+Lighting.ChildAdded:Connect(function(effect)
+    task.defer(removeLightingEffect, effect)
+end)
+
+-- =============================================================
+-- TẮT ÂM THANH
+-- =============================================================
+
+local function muteSound(sound)
+    if not sound or not sound.Parent then
+        return
+    end
+
+    pcall(function()
+        sound:Stop()
+        sound.Volume = 0
+        sound.Playing = false
+    end)
+end
+
+local function muteSoundGroup(soundGroup)
+    if not soundGroup or not soundGroup.Parent then
+        return
+    end
+
+    pcall(function()
+        soundGroup.Volume = 0
+    end)
+end
+
+local function muteAudioObject(object)
+    if not object then
+        return
+    end
+
+    if object:IsA("Sound") then
+        muteSound(object)
+    elseif object:IsA("SoundGroup") then
+        muteSoundGroup(object)
+    end
+end
+
+pcall(function()
+    SoundService.RespectFilteringEnabled = true
+end)
+
+for _, object in ipairs(SoundService:GetDescendants()) do
+    muteAudioObject(object)
+end
+
+SoundService.DescendantAdded:Connect(function(object)
+    task.defer(muteAudioObject, object)
+end)
+
+-- =============================================================
+-- GIỮ MẶT ĐẤT, ẨN CÔNG TRÌNH/CÂY TRANG TRÍ
+-- =============================================================
+
+local GroundKeywords = {
+    "ground", "floor", "baseplate", "terrain", "land",
+    "grass", "road", "path", "island", "platform"
+}
+
+local function isGroundPart(object)
+    if not KEEP_GROUND_VISIBLE or not object or not object:IsA("BasePart") then
+        return false
+    end
+
+    local name = string.lower(object.Name)
+
+    for index = 1, #GroundKeywords do
+        if string.find(name, GroundKeywords[index], 1, true) then
+            return true
+        end
+    end
+
+    -- Giữ các mặt phẳng rất rộng và mỏng vì thường là nền để đứng.
+    local size = object.Size
+    if size.Y <= 8 and size.X >= 80 and size.Z >= 80 then
+        return true
+    end
+
+    return false
+end
+
+-- =============================================================
+-- NHẬN DIỆN KHU VƯỜN / PLOT
+-- Không phụ thuộc tên từng loại cây.
+-- =============================================================
+
+local PlotKeywords = {
+    "plot", "plots", "garden", "gardens", "farm", "farms",
+    "plantzone", "plant_zone", "cropzone", "crop_zone",
+    "growzone", "grow_zone", "allotment", "bed", "soil"
+}
+
+local PlotAttributes = {
+    "Owner", "OwnerId", "OwnerUserId", "PlotOwner",
+    "IsPlot", "IsGarden", "IsFarm", "GardenId", "PlotId"
+}
+
+local function nameLooksLikePlot(object)
+    if not object then
+        return false
+    end
+
+    local name = string.lower(object.Name)
+    local normalizedName = string.gsub(name, "[%s%-%.]", "_")
+
+    for index = 1, #PlotKeywords do
+        if string.find(normalizedName, PlotKeywords[index], 1, true) then
+            return true
+        end
+    end
+
+    return false
+end
+
+local function hasPlotAttribute(object)
+    if not object then
+        return false
+    end
+
+    for index = 1, #PlotAttributes do
+        local success, value = pcall(function()
+            return object:GetAttribute(PlotAttributes[index])
+        end)
+
+        if success and value ~= nil and value ~= false then
+            return true
+        end
+    end
+
+    return false
+end
+
+local function isInsidePlot(object)
+    if not HIDE_PLOT_CONTENTS or not object then
+        return false
+    end
+
+    local current = object
+
+    while current and current ~= Workspace do
+        if nameLooksLikePlot(current) or hasPlotAttribute(current) then
+            return true
+        end
+
+        current = current.Parent
+    end
+
+    return false
+end
+
+local function hidePlotVisual(object)
+    if not object or not object.Parent or isImportant(object) then
+        return
+    end
+
+    if object:IsA("BasePart") then
+        if isGroundPart(object) then
+            return
+        end
+
+        PlotVisualCache[object] = true
+
+        pcall(function()
+            object.LocalTransparencyModifier = 1
+            object.Transparency = 1
+            object.CastShadow = false
+            object.Reflectance = 0
+        end)
+
+    elseif object:IsA("Decal") or object:IsA("Texture") then
+        PlotVisualCache[object] = true
+        pcall(function()
+            object.Transparency = 1
+        end)
+
+    elseif object:IsA("SurfaceAppearance") then
+        PlotVisualCache[object] = true
+        -- Không Destroy để tránh spike và lỗi khi game tạo lại texture.
+        return
+
+    elseif isEffect(object) then
+        PlotVisualCache[object] = true
+        pcall(function()
+            object.Enabled = false
+        end)
+
+    elseif object:IsA("BillboardGui") or object:IsA("SurfaceGui") then
+        PlotVisualCache[object] = true
+        pcall(function()
+            object.Enabled = false
+        end)
+    end
+end
+
+local function hideWorldVisual(object)
+    if not object or not object.Parent or isImportant(object) then
+        return
+    end
+
+    if object:IsA("BasePart") then
+        if isGroundPart(object) then
+            pcall(function()
+                object.CastShadow = false
+                object.Reflectance = 0
+            end)
+            return
+        end
+
+        WorldVisualCache[object] = true
+
+        pcall(function()
+            object.LocalTransparencyModifier = 1
+            if FORCE_TRANSPARENCY then
+                object.Transparency = 1
+            end
+            object.CastShadow = false
+            object.Reflectance = 0
+        end)
+
+    elseif object:IsA("Decal") or object:IsA("Texture") then
+        WorldVisualCache[object] = true
+        pcall(function()
+            object.Transparency = 1
+        end)
+
+    elseif object:IsA("SurfaceAppearance") then
+        WorldVisualCache[object] = true
+        -- Không Destroy để tránh game tạo lại liên tục gây lag.
+        return
+
+    elseif isEffect(object) then
+        WorldVisualCache[object] = true
+        pcall(function()
+            object.Enabled = false
+        end)
+
+    elseif object:IsA("BillboardGui") or object:IsA("SurfaceGui") then
+        WorldVisualCache[object] = true
+        pcall(function()
+            object.Enabled = false
+        end)
+    end
+end
+
+-- =============================================================
+-- TỐI ƯU INSTANCE
+-- =============================================================
+
+local function optimizeObject(object)
+    if not object
+        or not object.Parent
+        or OptimizedCache[object] then
+        return
+    end
+
+    OptimizedCache[object] = true
+
+    if object:IsA("Sound") then
+        muteSound(object)
+        return
+    end
+
+    local important = isImportant(object)
+
+    if not important
+        and HIDE_PLOT_CONTENTS
+        and isInsidePlot(object) then
+
+        hidePlotVisual(object)
+        return
+    end
+
+    if not important
+        and HIDE_ALL_CROPS
+        and isCropRelated(object) then
+
+        hideCropVisual(object)
+        return
+    end
+
+    if HIDE_WORLD_STRUCTURES and not important then
+        if object:IsA("BasePart")
+            or object:IsA("Decal")
+            or object:IsA("Texture")
+            or object:IsA("SurfaceAppearance")
+            or object:IsA("BillboardGui")
+            or object:IsA("SurfaceGui")
+            or isEffect(object) then
+
+            hideWorldVisual(object)
+            return
+        end
+    end
+
+    if object:IsA("BillboardGui")
+        or object:IsA("SurfaceGui") then
+        return
+    end
+
+    if isEffect(object) then
+        if not important then
+            if AGGRESSIVE_FREE then
+                pcall(function()
+                    object:Destroy()
+                end)
+            else
+                pcall(function()
+                    object.Enabled = false
+                end)
+            end
+        end
+
+        return
+    end
+
+    if object:IsA("Decal") or object:IsA("Texture") then
+        if not important then
+            if AGGRESSIVE_FREE then
+                pcall(function()
+                    object:Destroy()
+                end)
+            else
+                pcall(function()
+                    object.Transparency = 1
+                end)
+            end
+        end
+
+        return
+    end
+
+    if object:IsA("SurfaceAppearance") then
+        if not important and AGGRESSIVE_FREE then
+            pcall(function()
+                object:Destroy()
+            end)
+        end
+
+        return
+    end
+
+    if object:IsA("BasePart") then
+        pcall(function()
+            object.CastShadow = false
+        end)
+
+        if important then
+            return
+        end
+
+        pcall(function()
+            object.LocalTransparencyModifier = 1
+            object.CastShadow = false
+            object.Reflectance = 0
+
+            if SIMPLIFY_MATERIAL then
+                object.Material = Enum.Material.Plastic
+            end
+
+            if DISABLE_WORLD_TOUCH then
+                object.CanTouch = false
+            end
+
+            if DISABLE_WORLD_QUERY then
+                object.CanQuery = false
+            end
+        end)
+
+        if object:IsA("MeshPart")
+            and REMOVE_MESH_TEXTURE then
+
+            pcall(function()
+                object.TextureID = ""
+            end)
+        end
+    end
+end
+
+-- =============================================================
+-- HÀNG ĐỢI XỬ LÝ
+-- =============================================================
+
+local ProcessQueue = {}
+local QueueHead = 1
+local QueueTail = 0
+
+local function getQueueSize()
+    if QueueTail < QueueHead then
+        return 0
+    end
+
+    return QueueTail - QueueHead + 1
+end
+
+local function enqueue(object)
+    if not object or not object.Parent then
+        return false
+    end
+
+    if OptimizedCache[object] or QueuedCache[object] then
+        return false
+    end
+
+    if not shouldProcess(object) then
+        return false
+    end
+
+    QueueTail += 1
+    ProcessQueue[QueueTail] = object
+    QueuedCache[object] = true
+
+    return true
+end
+
+-- =============================================================
+-- XỬ LÝ ĐỐI TƯỢNG MỚI
+-- =============================================================
+
+Workspace.DescendantAdded:Connect(function(object)
+    enqueue(object)
+
+    if object:IsA("Sound") then
+        task.defer(muteSound, object)
+    end
+
+    if object:IsA("Humanoid") then
+        local model = object.Parent
+
+        if model and model:IsA("Model") then
+            ImportantModelCache[model] = true
+        end
+    end
+end)
+
+-- =============================================================
+-- QUÉT WORKSPACE KHÔNG DÙNG GetDescendants()
+-- =============================================================
+
+task.spawn(function()
+    local ScanQueue = { Workspace }
+    local scanHead = 1
+    local scannedParents = 0
+
+    while scanHead <= #ScanQueue do
+        local parent = ScanQueue[scanHead]
+
+        ScanQueue[scanHead] = nil
+        scanHead += 1
+        scannedParents += 1
+
+        if parent and parent.Parent then
+            local children = nil
+
+            local success = pcall(function()
+                children = parent:GetChildren()
+            end)
+
+            if success and children then
+                for index = 1, #children do
+                    local child = children[index]
+
+                    if child and child.Parent then
+                        if shouldProcess(child) then
+                            while getQueueSize() >= MAX_QUEUE_SIZE do
+                                RunService.Heartbeat:Wait()
+                            end
+
+                            enqueue(child)
+                        end
+
+                        local shouldScanChildren = false
+
+                        if child:IsA("Model")
+                            or child:IsA("Folder")
+                            or child:IsA("WorldModel")
+                            or child:IsA("Camera") then
+
+                            shouldScanChildren = true
+                        else
+                            pcall(function()
+                                shouldScanChildren = #child:GetChildren() > 0
+                            end)
+                        end
+
+                        if shouldScanChildren then
+                            ScanQueue[#ScanQueue + 1] = child
+                        end
+                    end
+                end
+            end
+        end
+
+        if scannedParents % 40 == 0 then
+            RunService.Heartbeat:Wait()
+        end
+    end
+
+    table.clear(ScanQueue)
+end)
+
+-- =============================================================
+-- WORKER XỬ LÝ THEO FRAME
+-- =============================================================
+
+task.spawn(function()
+    while true do
+        RunService.Heartbeat:Wait()
+
+        local processed = 0
+        local frameStart = os.clock()
+
+        while QueueHead <= QueueTail do
+            if processed >= MAX_OBJECTS_PER_FRAME then
+                break
+            end
+
+            if os.clock() - frameStart >= MAX_TIME_PER_FRAME then
+                break
+            end
+
+            local object = ProcessQueue[QueueHead]
+
+            ProcessQueue[QueueHead] = nil
+            QueueHead += 1
+            processed += 1
+
+            if object then
+                QueuedCache[object] = nil
+
+                if object.Parent then
+                    optimizeObject(object)
+                end
+            end
+        end
+
+        if QueueHead > QueueTail then
+            table.clear(ProcessQueue)
+            QueueHead = 1
+            QueueTail = 0
+        end
+    end
+end)
+
+-- =============================================================
+-- DUY TRÌ TRẠNG THÁI ẨN CÂY
+-- =============================================================
+
+task.spawn(function()
+    while HIDE_ALL_CROPS do
+        task.wait(CROP_REHIDE_INTERVAL)
+
+        local processed = 0
+
+        for object in pairs(CropVisualCache) do
+            if object and object.Parent then
+                hideCropVisual(object)
+            else
+                CropVisualCache[object] = nil
+            end
+
+            processed += 1
+
+            if processed % 200 == 0 then
+                RunService.Heartbeat:Wait()
+            end
+        end
+    end
+end)
+
+-- =============================================================
+-- DUY TRÌ ẨN CÔNG TRÌNH VÀ CÂY TRANG TRÍ
+-- =============================================================
+
+task.spawn(function()
+    while HIDE_WORLD_STRUCTURES do
+        task.wait(WORLD_REHIDE_INTERVAL)
+
+        local processed = 0
+
+        for object in pairs(WorldVisualCache) do
+            if object and object.Parent then
+                hideWorldVisual(object)
+            else
+                WorldVisualCache[object] = nil
+            end
+
+            processed += 1
+
+            if processed % 120 == 0 then
+                RunService.Heartbeat:Wait()
+            end
+        end
+    end
+end)
+
+-- =============================================================
+-- KHÔNG QUÉT LẠI TOÀN BỘ WORKSPACE
+-- DescendantAdded + lần quét ban đầu đã xử lý vật thể mới.
+-- Bỏ GetDescendants() định kỳ để tránh CPU tăng vọt và treo máy.
+-- =============================================================
+
+-- =============================================================
+-- DUY TRÌ TRẠNG THÁI ẨN TRONG PLOT
+-- =============================================================
+
+task.spawn(function()
+    while HIDE_PLOT_CONTENTS do
+        task.wait(PLOT_RESCAN_INTERVAL)
+
+        local processed = 0
+
+        for object in pairs(PlotVisualCache) do
+            if object and object.Parent then
+                hidePlotVisual(object)
+            else
+                PlotVisualCache[object] = nil
+            end
+
+            processed += 1
+
+            if processed % 120 == 0 then
+                RunService.Heartbeat:Wait()
+            end
+        end
+    end
+end)
+
+-- =============================================================
+-- ẨN THÔNG BÁO
+-- Không ẩn nút bấm, ô nhập, inventory hoặc item
+-- =============================================================
+
+local NotificationKeywords = {
+    "notification",
+    "notifications",
+    "notify",
+    "toast",
+    "popup",
+    "pop_up",
+    "announcement",
+    "warning",
+    "alert",
+    "banner"
+}
+
+local function hasNotificationName(object)
+    local name = string.lower(object.Name)
+
+    for index = 1, #NotificationKeywords do
+        if string.find(name, NotificationKeywords[index], 1, true) then
+            return true
+        end
+    end
+
+    return false
+end
+
+local function hasInteractiveGui(object)
+    local success, result = pcall(function()
+        return object:FindFirstChildWhichIsA("GuiButton", true) ~= nil
+            or object:FindFirstChildWhichIsA("TextBox", true) ~= nil
+    end)
+
+    return success and result
+end
+
+local function isInsideInteractiveGui(object)
+    local success, result = pcall(function()
+        return object:FindFirstAncestorWhichIsA("GuiButton") ~= nil
+            or object:FindFirstAncestorWhichIsA("TextBox") ~= nil
+    end)
+
+    return success and result
+end
+
+local function hideNotification(object)
+    if not object or not object.Parent then
+        return
+    end
+
+    if object:IsA("GuiButton") or object:IsA("TextBox") then
+        return
+    end
+
+    if isInsideInteractiveGui(object) then
+        return
+    end
+
+    if not hasNotificationName(object) then
+        return
+    end
+
+    if hasInteractiveGui(object) then
+        return
+    end
+
+    pcall(function()
+        if object:IsA("ScreenGui")
+            or object:IsA("BillboardGui")
+            or object:IsA("SurfaceGui") then
+
+            object.Enabled = false
+
+        elseif object:IsA("Frame")
+            or object:IsA("TextLabel")
+            or object:IsA("ImageLabel") then
+
+            object.Visible = false
+        end
+    end)
+end
+
+task.spawn(function()
+    local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+
+    for _, object in ipairs(PlayerGui:GetDescendants()) do
+        if object:IsA("Sound") then
+            muteSound(object)
+        else
+            hideNotification(object)
+        end
+    end
+
+    PlayerGui.DescendantAdded:Connect(function(object)
+        if object:IsA("Sound") then
+            task.defer(muteSound, object)
+        else
+            task.defer(hideNotification, object)
+        end
+    end)
+end)
+
+-- =============================================================
+-- HOÀN TẤT
+-- Không lock camera.
+-- Không dùng collectgarbage("step").
+-- Cây trong Plot được ẩn theo khu vườn, không phụ thuộc tên cây; mặt đất lớn vẫn được giữ lại.
+-- Không xóa hitbox/touch/query nên auto farm vẫn có thể tương tác.
+-- =============================================================
