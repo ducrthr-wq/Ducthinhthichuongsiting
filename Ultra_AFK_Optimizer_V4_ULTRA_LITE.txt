@@ -1,0 +1,258 @@
+-- =============================================================
+-- Ultra AFK Optimizer V4 - Ultra Lite Render-Off
+-- Mục tiêu: giảm tải nền lâu dài, không quét Workspace
+-- Giữ GUI + giữ dữ liệu/hitbox để auto farm vẫn tương tác
+-- =============================================================
+
+-- =============================================================
+-- CHỐNG CHẠY LẶP
+-- =============================================================
+
+local Environment = _G
+
+if getgenv then
+    local success, executorEnvironment = pcall(getgenv)
+
+    if success and type(executorEnvironment) == "table" then
+        Environment = executorEnvironment
+    end
+end
+
+if Environment.__ULTRA_AFK_OPTIMIZER_V4_ULTRA_LITE_LOADED then
+    return
+end
+
+Environment.__ULTRA_AFK_OPTIMIZER_V4_ULTRA_LITE_LOADED = true
+
+-- =============================================================
+-- SERVICES
+-- =============================================================
+
+local Lighting = game:GetService("Lighting")
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local SoundService = game:GetService("SoundService")
+
+local LocalPlayer = Players.LocalPlayer
+
+-- =============================================================
+-- CẤU HÌNH
+-- =============================================================
+
+-- 10 FPS giảm tải mạnh hơn; đổi thành 15 nếu auto farm chạy chậm.
+local FPS_CAP = 10
+
+-- Tắt dựng cảnh 3D nhưng vẫn giữ GUI, instance, hitbox, raycast và touch.
+-- Đây là phần thay thế toàn bộ việc quét/ẩn cây, vườn và công trình.
+local DISABLE_3D_RENDERING = true
+
+local MUTE_ALL_AUDIO = true
+local HIDE_NOTIFICATIONS = true
+
+-- =============================================================
+-- GIẢM FPS VÀ CHẤT LƯỢNG
+-- =============================================================
+
+pcall(function()
+    if setfpscap then
+        setfpscap(FPS_CAP)
+    end
+end)
+
+pcall(function()
+    settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
+end)
+
+-- Tắt render 3D không xóa vật thể và không tạo hàng nghìn cache.
+pcall(function()
+    if DISABLE_3D_RENDERING then
+        RunService:Set3dRenderingEnabled(false)
+    end
+end)
+
+-- =============================================================
+-- GIẢM HIỆU ỨNG ÁNH SÁNG
+-- Không Destroy để tránh game tạo lại liên tục.
+-- =============================================================
+
+pcall(function()
+    Lighting.GlobalShadows = false
+    Lighting.Brightness = 1
+    Lighting.FogStart = 0
+    Lighting.FogEnd = 100000
+    Lighting.ExposureCompensation = 0
+    Lighting.EnvironmentDiffuseScale = 0
+    Lighting.EnvironmentSpecularScale = 0
+end)
+
+local function disableLightingEffect(object)
+    if not object then
+        return
+    end
+
+    if object:IsA("PostEffect") then
+        pcall(function()
+            object.Enabled = false
+        end)
+        return
+    end
+
+    if object:IsA("Atmosphere") then
+        pcall(function()
+            object.Density = 0
+            object.Haze = 0
+            object.Glare = 0
+        end)
+    end
+end
+
+for _, object in ipairs(Lighting:GetChildren()) do
+    disableLightingEffect(object)
+end
+
+Lighting.ChildAdded:Connect(disableLightingEffect)
+
+-- =============================================================
+-- TẮT ÂM THANH
+-- Chỉ theo dõi Sound mới; không quét Workspace.
+-- =============================================================
+
+local function muteAudioObject(object)
+    if not MUTE_ALL_AUDIO or not object then
+        return
+    end
+
+    if object:IsA("Sound") then
+        pcall(function()
+            object:Stop()
+            object.Volume = 0
+            object.Playing = false
+        end)
+    elseif object:IsA("SoundGroup") then
+        pcall(function()
+            object.Volume = 0
+        end)
+    end
+end
+
+if MUTE_ALL_AUDIO then
+    for _, object in ipairs(SoundService:GetDescendants()) do
+        muteAudioObject(object)
+    end
+
+    SoundService.DescendantAdded:Connect(muteAudioObject)
+end
+
+-- =============================================================
+-- ẨN THÔNG BÁO
+-- Chỉ kiểm tra GUI có tên liên quan; không tìm kiếm đệ quy trên mọi GUI.
+-- =============================================================
+
+local NotificationKeywords = {
+    "notification",
+    "notifications",
+    "notify",
+    "toast",
+    "popup",
+    "pop_up",
+    "announcement",
+    "warning",
+    "alert",
+    "banner"
+}
+
+local function hasNotificationName(object)
+    local name = string.lower(object.Name)
+
+    for index = 1, #NotificationKeywords do
+        if string.find(name, NotificationKeywords[index], 1, true) then
+            return true
+        end
+    end
+
+    return false
+end
+
+local function isInsideButtonOrInput(object)
+    local current = object.Parent
+
+    while current do
+        if current:IsA("GuiButton") or current:IsA("TextBox") then
+            return true
+        end
+
+        if current:IsA("ScreenGui") then
+            break
+        end
+
+        current = current.Parent
+    end
+
+    return false
+end
+
+local function hideNotification(object)
+    if not HIDE_NOTIFICATIONS or not object or not object.Parent then
+        return
+    end
+
+    local supported = object:IsA("ScreenGui")
+        or object:IsA("BillboardGui")
+        or object:IsA("SurfaceGui")
+        or object:IsA("Frame")
+        or object:IsA("TextLabel")
+        or object:IsA("ImageLabel")
+
+    if not supported or not hasNotificationName(object) then
+        return
+    end
+
+    if object:IsA("GuiButton")
+        or object:IsA("TextBox")
+        or isInsideButtonOrInput(object) then
+        return
+    end
+
+    pcall(function()
+        if object:IsA("ScreenGui")
+            or object:IsA("BillboardGui")
+            or object:IsA("SurfaceGui") then
+            object.Enabled = false
+        else
+            object.Visible = false
+        end
+    end)
+end
+
+if HIDE_NOTIFICATIONS then
+    task.spawn(function()
+        local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+
+        -- Chỉ quét GUI một lần; số lượng GUI nhỏ hơn Workspace rất nhiều.
+        for _, object in ipairs(PlayerGui:GetDescendants()) do
+            hideNotification(object)
+        end
+
+        PlayerGui.DescendantAdded:Connect(function(object)
+            if object:IsA("Sound") then
+                muteAudioObject(object)
+            else
+                hideNotification(object)
+            end
+        end)
+    end)
+end
+
+-- =============================================================
+-- HOÀN TẤT
+-- Không có:
+--   * Workspace:GetDescendants()
+--   * Workspace.DescendantAdded
+--   * hàng đợi chạy mỗi Heartbeat
+--   * cache hàng nghìn object
+--   * vòng quét lại cây/vườn/công trình
+--   * Destroy texture/effect
+--
+-- Lưu ý: tắt render 3D không phải giới hạn cứng RAM/CPU.
+-- Nó chỉ giảm phần dựng hình và bỏ tải do chính optimizer tạo ra.
+-- =============================================================
