@@ -1,0 +1,1411 @@
+--[[
+===============================================================================
+ AXIOM UNIVERSAL MULTI-GAME AFK OPTIMIZER V3
+ PC / LAPTOP / MOBILE / CLOUD PHONE / MULTI-CLIENT
+
+ MỤC TIÊU
+   - Một lõi dùng cho nhiều game Roblox, không khóa vào Grow/Farm/Simulator.
+   - Universal Core chỉ tối ưu những thứ có tính chất render/audio rõ ràng.
+   - Game-specific logic được tách thành Adapter, có thể thêm mà không sửa core.
+   - Không rescan Workspace theo chu kỳ.
+   - Không dùng RenderStepped / Heartbeat để chạy optimizer mỗi frame.
+   - Hỗ trợ content được stream/tạo muộn bằng DescendantAdded.
+   - Không Destroy object gameplay ở cấu hình mặc định.
+   - Không sửa CanCollide / CanTouch / CanQuery / Anchored.
+   - Không động vào PlayerGui/CoreGui.
+   - Có telemetry nhẹ để đọc RAM/CPU/GPU/draw-call khi cần.
+
+ PROFILE
+   "AUTO"       : Khuyên dùng công khai. AFK-balanced, tự chỉnh FPS theo thiết bị.
+   "MULTIGAME"  : An toàn nhất cho nhiều game, không ẩn world.
+   "AFK"        : Mạnh hơn cho treo nhiều client, vẫn không ẩn toàn world.
+   "POTATO"     : Ẩn phần lớn 3D world phía client; opt-in cho AFK cực nặng.
+
+ ADAPTER API
+   Adapter có thể phân loại object thành:
+      "KEEP"    -> Core không ẩn/sửa mạnh object này.
+      "HIDE"    -> Cho phép ẩn visual của object.
+      "DEFAULT" -> Core tự xử lý.
+
+   Ví dụ adapter bên ngoài:
+      getgenv().AXIOM_ADAPTERS = {
+          {
+              Name = "Example",
+              Match = function(ctx)
+                  return ctx.PlaceId == 123456
+              end,
+              Classify = function(object, ctx)
+                  if object.Name == "ImportantDoor" then
+                      return "KEEP"
+                  end
+                  return "DEFAULT"
+              end
+          }
+      }
+
+ LƯU Ý
+   - setfpscap() không phải API chuẩn của Roblox; script chỉ dùng nếu môi trường có.
+   - Một LocalScript không thể đặt "hard RAM cap" cho tiến trình Roblox.
+   - Nếu game bật StreamingEnabled, object có thể xuất hiện lại; event-driven handler
+     sẽ xử lý object mới mà không cần quét toàn map mỗi 8-10 giây.
+===============================================================================
+]]
+
+------------------------------------------------------------------------------
+-- SERVICES
+------------------------------------------------------------------------------
+
+local Players = game:GetService("Players")
+local Lighting = game:GetService("Lighting")
+local Workspace = game:GetService("Workspace")
+local SoundService = game:GetService("SoundService")
+local UserInputService = game:GetService("UserInputService")
+local Stats = game:GetService("Stats")
+
+local LocalPlayer = Players.LocalPlayer
+local Terrain = Workspace:FindFirstChildOfClass("Terrain")
+
+------------------------------------------------------------------------------
+-- ENVIRONMENT / SINGLETON
+------------------------------------------------------------------------------
+
+local ENV = (getgenv and getgenv()) or _G
+
+if ENV.__AXIOM_MULTI_GAME_V3_LOADED then
+    warn("[AXIOM] Multi-Game Optimizer V3 is already running.")
+    return
+end
+
+ENV.__AXIOM_MULTI_GAME_V3_LOADED = true
+
+------------------------------------------------------------------------------
+-- USER CONFIG
+------------------------------------------------------------------------------
+
+local PROFILE = "AUTO"
+
+-- FPS target. setfpscap() chỉ chạy nếu executor/môi trường cung cấp.
+local AUTO_DESKTOP_FPS = 15
+local AUTO_MOBILE_FPS = 12
+local BACKGROUND_FPS = 5
+
+-- Telemetry chỉ lấy mẫu thưa, không chạy mỗi frame.
+local TELEMETRY_INTERVAL = 20
+local DEBUG = false
+
+-- Không tự xóa SurfaceAppearance/PostEffect.
+-- Ẩn/disable an toàn hơn Destroy đối với script đa game.
+local ALLOW_DESTRUCTIVE_VISUAL_CHANGES = false
+
+------------------------------------------------------------------------------
+-- DEVICE DETECTION
+------------------------------------------------------------------------------
+
+local function isMobileDevice()
+    local ok, value = pcall(function()
+        return UserInputService.TouchEnabled
+            and not UserInputService.KeyboardEnabled
+    end)
+
+    return ok and value or false
+end
+
+local IS_MOBILE = isMobileDevice()
+
+------------------------------------------------------------------------------
+-- PROFILE DEFINITIONS
+------------------------------------------------------------------------------
+
+local Profiles = {
+    MULTIGAME = {
+        ActiveFPS = 20,
+        BackgroundFPS = 8,
+
+        DisablePostEffects = true,
+        DisableParticles = true,
+        DisableTrails = true,
+        DisableBeams = true,
+        DisableHighlights = true,
+        DisableLights = true,
+        DisableShadows = true,
+
+        SimplifyMaterials = false,
+        HideTextures = false,
+        HideMeshTextures = false,
+        HideWorld = false,
+        KeepGroundVisible = true,
+
+        MuteAudio = false,
+
+        InitialObjectsPerSlice = 180,
+        InitialSliceDelay = 0.03,
+
+        QueueBatch = 100,
+        QueueDelay = 0.04,
+        MaxQueueSize = 1800,
+
+        DynamicRecheckSeconds = 20,
+    },
+
+    AFK = {
+        ActiveFPS = 15,
+        BackgroundFPS = 5,
+
+        DisablePostEffects = true,
+        DisableParticles = true,
+        DisableTrails = true,
+        DisableBeams = true,
+        DisableHighlights = true,
+        DisableLights = true,
+        DisableShadows = true,
+
+        SimplifyMaterials = true,
+        HideTextures = true,
+        HideMeshTextures = false,
+        HideWorld = false,
+        KeepGroundVisible = true,
+
+        MuteAudio = true,
+
+        InitialObjectsPerSlice = 150,
+        InitialSliceDelay = 0.04,
+
+        QueueBatch = 90,
+        QueueDelay = 0.045,
+        MaxQueueSize = 1600,
+
+        DynamicRecheckSeconds = 20,
+    },
+
+    POTATO = {
+        ActiveFPS = 10,
+        BackgroundFPS = 5,
+
+        DisablePostEffects = true,
+        DisableParticles = true,
+        DisableTrails = true,
+        DisableBeams = true,
+        DisableHighlights = true,
+        DisableLights = true,
+        DisableShadows = true,
+
+        SimplifyMaterials = true,
+        HideTextures = true,
+        HideMeshTextures = true,
+        HideWorld = true,
+        KeepGroundVisible = true,
+
+        MuteAudio = true,
+
+        InitialObjectsPerSlice = 120,
+        InitialSliceDelay = 0.05,
+
+        QueueBatch = 70,
+        QueueDelay = 0.055,
+        MaxQueueSize = 1400,
+
+        DynamicRecheckSeconds = 15,
+    },
+}
+
+local function cloneTable(source)
+    local result = {}
+
+    for key, value in pairs(source) do
+        result[key] = value
+    end
+
+    return result
+end
+
+local ActiveProfileName
+local Config
+
+if PROFILE == "AUTO" then
+    ActiveProfileName = "AUTO/AFK"
+    Config = cloneTable(Profiles.AFK)
+    Config.ActiveFPS = IS_MOBILE and AUTO_MOBILE_FPS or AUTO_DESKTOP_FPS
+    Config.BackgroundFPS = BACKGROUND_FPS
+else
+    ActiveProfileName = Profiles[PROFILE] and PROFILE or "AFK"
+    Config = cloneTable(Profiles[ActiveProfileName])
+end
+
+------------------------------------------------------------------------------
+-- GAME CONTEXT
+------------------------------------------------------------------------------
+
+local Context = {
+    PlaceId = game.PlaceId,
+    GameId = game.GameId,
+    IsMobile = IS_MOBILE,
+    Profile = ActiveProfileName,
+}
+
+------------------------------------------------------------------------------
+-- INTERNAL STATE
+------------------------------------------------------------------------------
+
+local running = true
+local scanRunning = false
+local focused = true
+
+local Connections = {}
+
+-- Weak tables: không pin Instance trong Luau heap sau khi object biến mất.
+local CharacterModels = setmetatable({}, { __mode = "k" })
+local DynamicObjects = setmetatable({}, { __mode = "k" })
+local QueuedObjects = setmetatable({}, { __mode = "k" })
+local AdapterDecisionCache = setmetatable({}, { __mode = "k" })
+
+-- Ring-like queue.
+local Queue = {}
+local QueueHead = 1
+local QueueTail = 0
+
+-- Telemetry snapshot.
+local Telemetry = {
+    MemoryMB = nil,
+    RenderCPUms = nil,
+    RenderGPUms = nil,
+    DrawCalls = nil,
+    Instances = nil,
+    Timestamp = 0,
+}
+
+------------------------------------------------------------------------------
+-- LOG
+------------------------------------------------------------------------------
+
+local function log(...)
+    if DEBUG then
+        print("[AXIOM]", ...)
+    end
+end
+
+------------------------------------------------------------------------------
+-- CONNECTION MANAGER
+------------------------------------------------------------------------------
+
+local function connect(signal, callback)
+    local connection = signal:Connect(callback)
+    Connections[#Connections + 1] = connection
+    return connection
+end
+
+------------------------------------------------------------------------------
+-- CAPABILITIES
+------------------------------------------------------------------------------
+
+local HAS_SET_FPS_CAP = type(setfpscap) == "function"
+
+local function applyFPS(value)
+    if not HAS_SET_FPS_CAP then
+        return
+    end
+
+    pcall(setfpscap, value)
+end
+
+------------------------------------------------------------------------------
+-- PLAYER / CHARACTER PROTECTION
+------------------------------------------------------------------------------
+
+local function registerCharacter(character)
+    if character then
+        CharacterModels[character] = true
+    end
+end
+
+local function registerPlayer(player)
+    if player.Character then
+        registerCharacter(player.Character)
+    end
+
+    connect(player.CharacterAdded, registerCharacter)
+end
+
+for _, player in ipairs(Players:GetPlayers()) do
+    registerPlayer(player)
+end
+
+connect(Players.PlayerAdded, registerPlayer)
+
+connect(Players.PlayerRemoving, function(player)
+    if player.Character then
+        CharacterModels[player.Character] = nil
+    end
+end)
+
+local function isCharacterDescendant(object)
+    local current = object
+
+    while current and current ~= Workspace do
+        if CharacterModels[current] then
+            return true
+        end
+
+        current = current.Parent
+    end
+
+    return false
+end
+
+------------------------------------------------------------------------------
+-- UNIVERSAL PROTECTION
+------------------------------------------------------------------------------
+
+local function isProtectedObject(object)
+    if not object then
+        return true
+    end
+
+    if object:IsA("Tool")
+        or object:FindFirstAncestorWhichIsA("Tool") then
+        return true
+    end
+
+    if isCharacterDescendant(object) then
+        return true
+    end
+
+    local model = object:FindFirstAncestorWhichIsA("Model")
+
+    if model and model:FindFirstChildOfClass("Humanoid") then
+        -- Giữ NPC mặc định để script đa game không phá combat/quest.
+        return true
+    end
+
+    local camera = Workspace.CurrentCamera
+
+    if camera then
+        if object == camera then
+            return true
+        end
+
+        local ok, insideCamera = pcall(function()
+            return object:IsDescendantOf(camera)
+        end)
+
+        if ok and insideCamera then
+            return true
+        end
+    end
+
+    if object:IsA("SpawnLocation")
+        or object:IsA("Seat")
+        or object:IsA("VehicleSeat") then
+        return true
+    end
+
+    return false
+end
+
+------------------------------------------------------------------------------
+-- GROUND HEURISTIC
+--
+-- Chỉ dùng trong POTATO. Không phải nhận diện "game farm".
+------------------------------------------------------------------------------
+
+local GroundNames = {
+    "ground",
+    "floor",
+    "baseplate",
+    "terrain",
+    "land",
+    "road",
+    "path",
+    "platform",
+}
+
+local function isLikelyGround(part)
+    if not Config.KeepGroundVisible
+        or not part
+        or not part:IsA("BasePart") then
+        return false
+    end
+
+    local lowerName = string.lower(part.Name)
+
+    for i = 1, #GroundNames do
+        if string.find(lowerName, GroundNames[i], 1, true) then
+            return true
+        end
+    end
+
+    local size = part.Size
+
+    -- Mặt phẳng lớn/mỏng thường là nền, sàn hoặc platform.
+    if size.Y <= 10 and size.X >= 90 and size.Z >= 90 then
+        return true
+    end
+
+    return false
+end
+
+------------------------------------------------------------------------------
+-- ADAPTER SYSTEM
+--
+-- Core không chứa danh sách carrot/banana/plot/... nữa.
+-- Mỗi game đặc thù có thể bổ sung Adapter riêng.
+------------------------------------------------------------------------------
+
+local Adapters = {}
+
+local function adapterMatches(adapter)
+    if type(adapter) ~= "table" then
+        return false
+    end
+
+    if type(adapter.Match) ~= "function" then
+        return false
+    end
+
+    local ok, result = pcall(adapter.Match, Context)
+
+    return ok and result == true
+end
+
+local function addAdapter(adapter)
+    if type(adapter) ~= "table" then
+        return false, "adapter must be a table"
+    end
+
+    if type(adapter.Match) ~= "function"
+        or type(adapter.Classify) ~= "function" then
+        return false, "adapter requires Match and Classify functions"
+    end
+
+    if not adapterMatches(adapter) then
+        return false, "adapter does not match this game"
+    end
+
+    Adapters[#Adapters + 1] = adapter
+
+    table.clear(AdapterDecisionCache)
+
+    log("Adapter enabled:", adapter.Name or ("#" .. tostring(#Adapters)))
+
+    return true
+end
+
+-- Adapter được khai báo trước khi script chạy.
+if type(ENV.AXIOM_ADAPTERS) == "table" then
+    for _, adapter in ipairs(ENV.AXIOM_ADAPTERS) do
+        addAdapter(adapter)
+    end
+end
+
+local function classifyByAdapters(object)
+    if #Adapters == 0 then
+        return "DEFAULT"
+    end
+
+    local cached = AdapterDecisionCache[object]
+
+    if cached ~= nil then
+        return cached
+    end
+
+    local decision = "DEFAULT"
+
+    for i = 1, #Adapters do
+        local adapter = Adapters[i]
+
+        local ok, result = pcall(
+            adapter.Classify,
+            object,
+            Context
+        )
+
+        if ok and type(result) == "string" then
+            result = string.upper(result)
+
+            if result == "KEEP" or result == "HIDE" then
+                decision = result
+                break
+            end
+        end
+    end
+
+    -- Chỉ cache quyết định đặc biệt. Không lưu DEFAULT cho cả map để tránh
+    -- weak-table phình lên hàng chục nghìn entry trên game lớn.
+    if decision ~= "DEFAULT" then
+        AdapterDecisionCache[object] = decision
+    end
+
+    return decision
+end
+
+------------------------------------------------------------------------------
+-- PROFILE / GRAPHICS BASELINE
+------------------------------------------------------------------------------
+
+applyFPS(Config.ActiveFPS)
+
+pcall(function()
+    settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
+end)
+
+pcall(function()
+    if Config.DisableShadows then
+        Lighting.GlobalShadows = false
+    end
+
+    Lighting.EnvironmentDiffuseScale = 0
+    Lighting.EnvironmentSpecularScale = 0
+    Lighting.FogStart = 0
+    Lighting.FogEnd = 1000000
+end)
+
+if Terrain then
+    pcall(function()
+        Terrain.WaterWaveSize = 0
+        Terrain.WaterWaveSpeed = 0
+        Terrain.WaterReflectance = 0
+        Terrain.Decoration = false
+    end)
+end
+
+------------------------------------------------------------------------------
+-- FOCUS-AWARE FPS
+------------------------------------------------------------------------------
+
+pcall(function()
+    connect(UserInputService.WindowFocusReleased, function()
+        focused = false
+        applyFPS(Config.BackgroundFPS)
+    end)
+
+    connect(UserInputService.WindowFocused, function()
+        focused = true
+        applyFPS(Config.ActiveFPS)
+    end)
+end)
+
+------------------------------------------------------------------------------
+-- VISUAL CLASS HELPERS
+------------------------------------------------------------------------------
+
+local function isPostEffect(object)
+    return object:IsA("BloomEffect")
+        or object:IsA("BlurEffect")
+        or object:IsA("SunRaysEffect")
+        or object:IsA("DepthOfFieldEffect")
+        or object:IsA("ColorCorrectionEffect")
+end
+
+local function isParticleLike(object)
+    return object:IsA("ParticleEmitter")
+        or object:IsA("Smoke")
+        or object:IsA("Fire")
+        or object:IsA("Sparkles")
+end
+
+local function isLight(object)
+    return object:IsA("PointLight")
+        or object:IsA("SpotLight")
+        or object:IsA("SurfaceLight")
+end
+
+local function isWorldGui(object)
+    return object:IsA("BillboardGui")
+        or object:IsA("SurfaceGui")
+end
+
+local function isAudioPlayer(object)
+    local ok, result = pcall(function()
+        return object:IsA("AudioPlayer")
+    end)
+
+    return ok and result
+end
+
+------------------------------------------------------------------------------
+-- DYNAMIC TRACKING
+------------------------------------------------------------------------------
+
+local function trackDynamic(object)
+    DynamicObjects[object] = true
+end
+
+------------------------------------------------------------------------------
+-- LIGHTING OPTIMIZER
+------------------------------------------------------------------------------
+
+local function optimizeLightingObject(object)
+    if not running or not object then
+        return
+    end
+
+    if Config.DisablePostEffects and isPostEffect(object) then
+        trackDynamic(object)
+
+        pcall(function()
+            object.Enabled = false
+        end)
+
+        return
+    end
+
+    if object:IsA("Atmosphere") then
+        trackDynamic(object)
+
+        pcall(function()
+            object.Density = 0
+            object.Haze = 0
+            object.Glare = 0
+        end)
+    end
+end
+
+for _, object in ipairs(Lighting:GetChildren()) do
+    optimizeLightingObject(object)
+end
+
+connect(Lighting.ChildAdded, function(object)
+    task.defer(optimizeLightingObject, object)
+end)
+
+------------------------------------------------------------------------------
+-- AUDIO OPTIMIZER
+--
+-- Không Stop() trong universal core vì một số game có thể dùng trạng thái phát
+-- âm thanh trong local logic. Volume=0 bảo toàn trạng thái tốt hơn.
+------------------------------------------------------------------------------
+
+local function muteAudioObject(object)
+    if not Config.MuteAudio or not object or not object.Parent then
+        return
+    end
+
+    if object:IsA("Sound") or object:IsA("SoundGroup") then
+        trackDynamic(object)
+
+        pcall(function()
+            object.Volume = 0
+        end)
+
+        return
+    end
+
+    if isAudioPlayer(object) then
+        trackDynamic(object)
+
+        pcall(function()
+            object.Volume = 0
+        end)
+    end
+end
+
+------------------------------------------------------------------------------
+-- HIDE VISUAL
+------------------------------------------------------------------------------
+
+local function hideVisual(object)
+    if not object or not object.Parent then
+        return
+    end
+
+    if object:IsA("BasePart") then
+        if isProtectedObject(object) or isLikelyGround(object) then
+            pcall(function()
+                object.CastShadow = false
+                object.Reflectance = 0
+            end)
+            return
+        end
+
+        pcall(function()
+            object.LocalTransparencyModifier = 1
+            object.CastShadow = false
+            object.Reflectance = 0
+        end)
+
+        return
+    end
+
+    if object:IsA("Decal") or object:IsA("Texture") then
+        pcall(function()
+            object.Transparency = 1
+        end)
+        return
+    end
+
+    if isParticleLike(object)
+        or object:IsA("Trail")
+        or object:IsA("Beam")
+        or object:IsA("Highlight")
+        or isLight(object) then
+
+        trackDynamic(object)
+
+        pcall(function()
+            object.Enabled = false
+        end)
+
+        return
+    end
+
+    if isWorldGui(object) then
+        trackDynamic(object)
+
+        pcall(function()
+            object.Enabled = false
+        end)
+
+        return
+    end
+
+    if object:IsA("SurfaceAppearance")
+        and ALLOW_DESTRUCTIVE_VISUAL_CHANGES then
+
+        pcall(function()
+            object:Destroy()
+        end)
+    end
+end
+
+------------------------------------------------------------------------------
+-- UNIVERSAL OBJECT OPTIMIZER
+------------------------------------------------------------------------------
+
+local function optimizeObject(object)
+    if not running or not object or not object.Parent then
+        return
+    end
+
+    local adapterDecision = classifyByAdapters(object)
+
+    if adapterDecision == "KEEP" then
+        -- Vẫn tắt shadow nếu đây là BasePart để giữ tối ưu cơ bản.
+        if object:IsA("BasePart") and Config.DisableShadows then
+            pcall(function()
+                object.CastShadow = false
+            end)
+        end
+        return
+    end
+
+    if adapterDecision == "HIDE" then
+        hideVisual(object)
+        return
+    end
+
+    --------------------------------------------------------------------------
+    -- AUDIO
+    --------------------------------------------------------------------------
+
+    if Config.MuteAudio then
+        if object:IsA("Sound")
+            or object:IsA("SoundGroup")
+            or isAudioPlayer(object) then
+
+            muteAudioObject(object)
+            return
+        end
+    end
+
+    --------------------------------------------------------------------------
+    -- PARTICLES
+    --------------------------------------------------------------------------
+
+    if Config.DisableParticles and isParticleLike(object) then
+        trackDynamic(object)
+
+        pcall(function()
+            object.Enabled = false
+
+            if object:IsA("ParticleEmitter") then
+                object.Rate = 0
+            end
+        end)
+
+        return
+    end
+
+    if Config.DisableTrails and object:IsA("Trail") then
+        trackDynamic(object)
+
+        pcall(function()
+            object.Enabled = false
+        end)
+
+        return
+    end
+
+    if Config.DisableBeams and object:IsA("Beam") then
+        trackDynamic(object)
+
+        pcall(function()
+            object.Enabled = false
+        end)
+
+        return
+    end
+
+    if Config.DisableHighlights and object:IsA("Highlight") then
+        trackDynamic(object)
+
+        pcall(function()
+            object.Enabled = false
+        end)
+
+        return
+    end
+
+    --------------------------------------------------------------------------
+    -- LIGHTS
+    --------------------------------------------------------------------------
+
+    if Config.DisableLights and isLight(object) then
+        trackDynamic(object)
+
+        pcall(function()
+            object.Enabled = false
+        end)
+
+        return
+    end
+
+    --------------------------------------------------------------------------
+    -- WORLD GUI
+    --
+    -- Chỉ ẩn trong POTATO/adapter HIDE. MULTIGAME/AFK giữ để game nào cần
+    -- ProximityPrompt/Billboard/Surface UI vẫn dùng được.
+    --------------------------------------------------------------------------
+
+    if isWorldGui(object) then
+        if Config.HideWorld then
+            hideVisual(object)
+        end
+
+        return
+    end
+
+    --------------------------------------------------------------------------
+    -- TEXTURE / DECAL
+    --------------------------------------------------------------------------
+
+    if Config.HideTextures
+        and (object:IsA("Texture") or object:IsA("Decal")) then
+
+        pcall(function()
+            object.Transparency = 1
+        end)
+
+        return
+    end
+
+    --------------------------------------------------------------------------
+    -- MESH TEXTURE
+    --------------------------------------------------------------------------
+
+    if Config.HideMeshTextures then
+        if object:IsA("SpecialMesh") then
+            pcall(function()
+                object.TextureId = ""
+            end)
+            return
+        end
+
+        if object:IsA("MeshPart") then
+            pcall(function()
+                object.TextureID = ""
+            end)
+            -- tiếp tục xuống BasePart để tắt shadow/hide world.
+        end
+    end
+
+    --------------------------------------------------------------------------
+    -- BASEPART
+    --------------------------------------------------------------------------
+
+    if object:IsA("BasePart") then
+        local protected = isProtectedObject(object)
+
+        pcall(function()
+            if Config.DisableShadows then
+                object.CastShadow = false
+            end
+
+            object.Reflectance = 0
+
+            if not protected and Config.SimplifyMaterials then
+                object.Material = Enum.Material.SmoothPlastic
+            end
+
+            if not protected
+                and Config.HideWorld
+                and not isLikelyGround(object) then
+
+                -- Client-only visual modifier; không thay collision/touch/query.
+                object.LocalTransparencyModifier = 1
+            end
+        end)
+
+        return
+    end
+end
+
+------------------------------------------------------------------------------
+-- SHOULD QUEUE
+--
+-- Chỉ queue class có lợi khi xử lý; bỏ qua Value/Remote/Script/etc.
+------------------------------------------------------------------------------
+
+local function shouldProcess(object)
+    if not object then
+        return false
+    end
+
+    if object:IsA("BasePart")
+        or object:IsA("Decal")
+        or object:IsA("Texture")
+        or object:IsA("SpecialMesh")
+        or object:IsA("SurfaceAppearance")
+        or object:IsA("ParticleEmitter")
+        or object:IsA("Trail")
+        or object:IsA("Beam")
+        or object:IsA("Smoke")
+        or object:IsA("Fire")
+        or object:IsA("Sparkles")
+        or object:IsA("Highlight")
+        or object:IsA("PointLight")
+        or object:IsA("SpotLight")
+        or object:IsA("SurfaceLight")
+        or object:IsA("BillboardGui")
+        or object:IsA("SurfaceGui")
+        or object:IsA("Sound")
+        or object:IsA("SoundGroup") then
+
+        return true
+    end
+
+    return isAudioPlayer(object)
+end
+
+------------------------------------------------------------------------------
+-- BOUNDED NEW-INSTANCE QUEUE
+--
+-- Không để burst hàng chục nghìn Instance làm queue phình vô hạn.
+------------------------------------------------------------------------------
+
+local function queueSize()
+    if QueueTail < QueueHead then
+        return 0
+    end
+
+    return QueueTail - QueueHead + 1
+end
+
+local function resetQueue()
+    Queue = {}
+    QueueHead = 1
+    QueueTail = 0
+end
+
+local function enqueue(object)
+    if not running
+        or not object
+        or not object.Parent
+        or not shouldProcess(object)
+        or QueuedObjects[object] then
+
+        return
+    end
+
+    if queueSize() >= Config.MaxQueueSize then
+        -- Backpressure: ưu tiên xử lý ngay object "rẻ" và có tác động lớn.
+        if isParticleLike(object)
+            or object:IsA("Trail")
+            or object:IsA("Beam")
+            or object:IsA("Highlight")
+            or isLight(object)
+            or object:IsA("Sound")
+            or isAudioPlayer(object) then
+
+            task.defer(optimizeObject, object)
+        end
+
+        -- BasePart/texture dư trong một burst cực lớn có thể bỏ qua.
+        -- Object tương lai vẫn được xử lý; tránh optimizer tự tạo RAM spike.
+        return
+    end
+
+    QueuedObjects[object] = true
+
+    QueueTail += 1
+    Queue[QueueTail] = object
+end
+
+task.spawn(function()
+    while running do
+        local processed = 0
+
+        while QueueHead <= QueueTail
+            and processed < Config.QueueBatch do
+
+            local object = Queue[QueueHead]
+            Queue[QueueHead] = nil
+            QueueHead += 1
+
+            if object then
+                QueuedObjects[object] = nil
+
+                if object.Parent then
+                    optimizeObject(object)
+                end
+            end
+
+            processed += 1
+        end
+
+        if QueueHead > QueueTail then
+            resetQueue()
+        end
+
+        task.wait(Config.QueueDelay)
+    end
+end)
+
+------------------------------------------------------------------------------
+-- STREAMING / LATE OBJECT SUPPORT
+------------------------------------------------------------------------------
+
+connect(Workspace.DescendantAdded, enqueue)
+connect(SoundService.DescendantAdded, enqueue)
+
+------------------------------------------------------------------------------
+-- MEMORY-SAFE INCREMENTAL SCAN
+--
+-- DFS kiểu stack:
+--   - Không Workspace:GetDescendants() tạo một mảng chứa toàn map.
+--   - Mỗi object xử lý một lần theo slice.
+--   - Không dùng Heartbeat.
+------------------------------------------------------------------------------
+
+local function incrementalScan(root)
+    if scanRunning or not running or not root then
+        return false
+    end
+
+    scanRunning = true
+
+    local stack = { root }
+    local stackTop = 1
+    local processed = 0
+
+    while running and stackTop > 0 do
+        local parent = stack[stackTop]
+        stack[stackTop] = nil
+        stackTop -= 1
+
+        if parent and parent.Parent then
+            local children = nil
+
+            local ok = pcall(function()
+                children = parent:GetChildren()
+            end)
+
+            if ok and children then
+                for i = 1, #children do
+                    local child = children[i]
+
+                    if child and child.Parent then
+                        if shouldProcess(child) then
+                            optimizeObject(child)
+                        end
+
+                        -- DFS: push child để kiểm tra descendants sau.
+                        stackTop += 1
+                        stack[stackTop] = child
+
+                        processed += 1
+
+                        if processed >= Config.InitialObjectsPerSlice then
+                            processed = 0
+                            task.wait(Config.InitialSliceDelay)
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    table.clear(stack)
+    scanRunning = false
+
+    return true
+end
+
+task.spawn(function()
+    -- Tránh tranh CPU với burst load đầu tiên của game.
+    task.wait(1)
+
+    incrementalScan(Workspace)
+
+    -- Scan tuần tự để không tạo hai traversal cùng lúc.
+    if running then
+        incrementalScan(SoundService)
+    end
+end)
+
+------------------------------------------------------------------------------
+-- DYNAMIC REAPPLY
+--
+-- Không rescan toàn map. Chỉ duyệt object thực sự có khả năng bị game bật lại.
+------------------------------------------------------------------------------
+
+local function reapplyDynamic(object)
+    if not object or not object.Parent then
+        DynamicObjects[object] = nil
+        return
+    end
+
+    if isPostEffect(object) then
+        pcall(function()
+            object.Enabled = false
+        end)
+        return
+    end
+
+    if object:IsA("Atmosphere") then
+        pcall(function()
+            object.Density = 0
+            object.Haze = 0
+            object.Glare = 0
+        end)
+        return
+    end
+
+    if isParticleLike(object) then
+        pcall(function()
+            object.Enabled = false
+
+            if object:IsA("ParticleEmitter") then
+                object.Rate = 0
+            end
+        end)
+        return
+    end
+
+    if object:IsA("Trail")
+        or object:IsA("Beam")
+        or object:IsA("Highlight")
+        or isLight(object) then
+
+        pcall(function()
+            object.Enabled = false
+        end)
+        return
+    end
+
+    if Config.MuteAudio then
+        if object:IsA("Sound")
+            or object:IsA("SoundGroup")
+            or isAudioPlayer(object) then
+
+            pcall(function()
+                object.Volume = 0
+            end)
+            return
+        end
+    end
+
+    if Config.HideWorld and isWorldGui(object) then
+        pcall(function()
+            object.Enabled = false
+        end)
+    end
+end
+
+task.spawn(function()
+    while running do
+        task.wait(Config.DynamicRecheckSeconds)
+
+        for object in pairs(DynamicObjects) do
+            reapplyDynamic(object)
+        end
+
+        pcall(function()
+            if Config.DisableShadows then
+                Lighting.GlobalShadows = false
+            end
+        end)
+    end
+end)
+
+------------------------------------------------------------------------------
+-- TELEMETRY
+--
+-- Low-frequency sampling. Không tự "hard cap RAM" vì engine/device/game khác nhau.
+------------------------------------------------------------------------------
+
+local function updateTelemetry()
+    local snapshot = {
+        Timestamp = os.clock(),
+    }
+
+    pcall(function()
+        snapshot.MemoryMB = Stats:GetTotalMemoryUsageMb()
+    end)
+
+    pcall(function()
+        snapshot.RenderCPUms = Stats.RenderCPUFrameTime * 1000
+    end)
+
+    pcall(function()
+        snapshot.RenderGPUms = Stats.RenderGPUFrameTime * 1000
+    end)
+
+    pcall(function()
+        snapshot.DrawCalls = Stats.SceneDrawcallCount
+    end)
+
+    pcall(function()
+        snapshot.Instances = Stats.InstanceCount
+    end)
+
+    Telemetry = snapshot
+end
+
+updateTelemetry()
+
+task.spawn(function()
+    while running do
+        task.wait(TELEMETRY_INTERVAL)
+
+        updateTelemetry()
+
+        if DEBUG then
+            print(
+                "[AXIOM][STAT]",
+                "RAM:", Telemetry.MemoryMB,
+                "CPUms:", Telemetry.RenderCPUms,
+                "GPUms:", Telemetry.RenderGPUms,
+                "Draw:", Telemetry.DrawCalls,
+                "Instances:", Telemetry.Instances
+            )
+        end
+    end
+end)
+
+------------------------------------------------------------------------------
+-- PUBLIC STATUS API
+------------------------------------------------------------------------------
+
+ENV.AXIOM_STATUS = function()
+    updateTelemetry()
+
+    return {
+        Version = "V3",
+        Profile = ActiveProfileName,
+        PlaceId = Context.PlaceId,
+        GameId = Context.GameId,
+        IsMobile = Context.IsMobile,
+        Focused = focused,
+        HasSetFpsCap = HAS_SET_FPS_CAP,
+        Adapters = #Adapters,
+        QueueSize = queueSize(),
+
+        MemoryMB = Telemetry.MemoryMB,
+        RenderCPUms = Telemetry.RenderCPUms,
+        RenderGPUms = Telemetry.RenderGPUms,
+        DrawCalls = Telemetry.DrawCalls,
+        Instances = Telemetry.Instances,
+    }
+end
+
+------------------------------------------------------------------------------
+-- PUBLIC ADAPTER API
+--
+-- Sau khi đăng ký adapter trong lúc đang chạy:
+--   getgenv().AXIOM_REGISTER_ADAPTER(adapter)
+--   getgenv().AXIOM_RESCAN()
+------------------------------------------------------------------------------
+
+ENV.AXIOM_REGISTER_ADAPTER = function(adapter)
+    local ok, reason = addAdapter(adapter)
+
+    if not ok then
+        warn("[AXIOM] Adapter rejected:", reason)
+    end
+
+    return ok, reason
+end
+
+ENV.AXIOM_RESCAN = function()
+    if scanRunning then
+        return false, "scan already running"
+    end
+
+    task.spawn(function()
+        incrementalScan(Workspace)
+    end)
+
+    return true
+end
+
+------------------------------------------------------------------------------
+-- RESPAWN
+------------------------------------------------------------------------------
+
+connect(LocalPlayer.CharacterAdded, function(character)
+    registerCharacter(character)
+
+    task.defer(function()
+        applyFPS(focused and Config.ActiveFPS or Config.BackgroundFPS)
+    end)
+end)
+
+------------------------------------------------------------------------------
+-- UNLOAD
+--
+-- Không giữ original value của hàng chục nghìn object để tiết kiệm RAM.
+-- Vì vậy unload dừng optimizer; rejoin khôi phục toàn bộ visual sạch nhất.
+------------------------------------------------------------------------------
+
+ENV.AXIOM_UNLOAD = function()
+    if not running then
+        return
+    end
+
+    running = false
+
+    for i = 1, #Connections do
+        local connection = Connections[i]
+
+        pcall(function()
+            connection:Disconnect()
+        end)
+
+        Connections[i] = nil
+    end
+
+    table.clear(Queue)
+    table.clear(CharacterModels)
+    table.clear(DynamicObjects)
+    table.clear(QueuedObjects)
+    table.clear(AdapterDecisionCache)
+    table.clear(Adapters)
+
+    ENV.__AXIOM_MULTI_GAME_V3_LOADED = nil
+
+    print("[AXIOM] Multi-Game Optimizer V3 stopped. Rejoin to restore visuals.")
+end
+
+------------------------------------------------------------------------------
+-- READY
+------------------------------------------------------------------------------
+
+print("================================================================")
+print("[AXIOM] Universal Multi-Game AFK Optimizer V3")
+print("[AXIOM] Profile     :", ActiveProfileName)
+print("[AXIOM] Device      :", IS_MOBILE and "Mobile/CloudPhone" or "PC/Laptop")
+print("[AXIOM] Active FPS  :", Config.ActiveFPS)
+print("[AXIOM] Background  :", Config.BackgroundFPS)
+print("[AXIOM] setfpscap   :", HAS_SET_FPS_CAP)
+print("[AXIOM] Adapters    :", #Adapters)
+print("[AXIOM] Hide World  :", Config.HideWorld)
+print("================================================================")
