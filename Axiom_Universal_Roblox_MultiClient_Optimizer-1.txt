@@ -1,0 +1,923 @@
+--[[
+====================================================================
+ AXIOM UNIVERSAL ROBLOX MULTI-CLIENT OPTIMIZER
+ Version: 1.0
+
+ Mục tiêu:
+   - PC / Laptop
+   - Android / Mobile
+   - Cloud Phone
+   - AFK nhiều client / nhiều instance
+   - Không quét Workspace mỗi frame
+   - Không Destroy bừa object gameplay
+   - Giảm GPU / CPU / hiệu ứng / texture
+   - Hạn chế tăng RAM do chính optimizer
+
+ PROFILE:
+   "SAFE"     : Ít khả năng ảnh hưởng game nhất
+   "BALANCED" : Khuyên dùng để AFK nhiều client
+   "EXTREME"  : Giảm hình ảnh mạnh, có thể ảnh hưởng một số game
+
+ QUAN TRỌNG:
+   Script này chủ yếu giảm tải phía CLIENT.
+   Nó không thể ép Roblox từ 3 GB xuống đúng một mức RAM cố định vì
+   asset/game logic/Lua state/network vẫn do chính game quản lý.
+====================================================================
+]]
+
+--------------------------------------------------------------------
+-- SERVICES
+--------------------------------------------------------------------
+
+local Players = game:GetService("Players")
+local Lighting = game:GetService("Lighting")
+local Workspace = game:GetService("Workspace")
+local SoundService = game:GetService("SoundService")
+local RunService = game:GetService("RunService")
+
+local LocalPlayer = Players.LocalPlayer
+local Terrain = Workspace:FindFirstChildOfClass("Terrain")
+
+--------------------------------------------------------------------
+-- PREVENT DOUBLE LOAD
+--------------------------------------------------------------------
+
+local ENV = getgenv and getgenv() or _G
+
+if ENV.AXIOM_OPTIMIZER_LOADED then
+    warn("[AXIOM] Optimizer already loaded.")
+    return
+end
+
+ENV.AXIOM_OPTIMIZER_LOADED = true
+
+--------------------------------------------------------------------
+-- PROFILE
+--------------------------------------------------------------------
+
+local PROFILE = "BALANCED"
+
+local Profiles = {
+
+    SAFE = {
+
+        FPS = 20,
+
+        DisableParticles = true,
+        DisableTrails = true,
+        DisableBeams = true,
+
+        DisableLights = true,
+        DisableShadows = true,
+
+        HideTextures = false,
+        SimplifyMaterials = false,
+
+        DisableSounds = false,
+
+        HideFarObjects = false,
+
+        FarDistance = 500,
+
+        DisableAnimations = false,
+
+        DisableTerrainDecoration = true,
+
+        ProcessBatch = 200,
+
+        BatchDelay = 0.025,
+    },
+
+    BALANCED = {
+
+        FPS = 15,
+
+        DisableParticles = true,
+        DisableTrails = true,
+        DisableBeams = true,
+
+        DisableLights = true,
+        DisableShadows = true,
+
+        HideTextures = true,
+        SimplifyMaterials = true,
+
+        DisableSounds = true,
+
+        HideFarObjects = false,
+
+        FarDistance = 300,
+
+        DisableAnimations = false,
+
+        DisableTerrainDecoration = true,
+
+        ProcessBatch = 250,
+
+        BatchDelay = 0.02,
+    },
+
+    EXTREME = {
+
+        FPS = 10,
+
+        DisableParticles = true,
+        DisableTrails = true,
+        DisableBeams = true,
+
+        DisableLights = true,
+        DisableShadows = true,
+
+        HideTextures = true,
+        SimplifyMaterials = true,
+
+        DisableSounds = true,
+
+        HideFarObjects = true,
+
+        FarDistance = 180,
+
+        DisableAnimations = false,
+
+        DisableTerrainDecoration = true,
+
+        ProcessBatch = 350,
+
+        BatchDelay = 0.015,
+    },
+}
+
+local Config = Profiles[PROFILE] or Profiles.BALANCED
+
+--------------------------------------------------------------------
+-- INTERNAL
+--------------------------------------------------------------------
+
+local Connections = {}
+
+local OriginalTransparency = setmetatable({}, {
+    __mode = "k"
+})
+
+local CharacterCache = setmetatable({}, {
+    __mode = "k"
+})
+
+local processingQueue = {}
+
+local queueHead = 1
+
+local queued = setmetatable({}, {
+    __mode = "k"
+})
+
+local running = true
+
+--------------------------------------------------------------------
+-- CONNECTION MANAGER
+--------------------------------------------------------------------
+
+local function connect(signal, callback)
+
+    local connection = signal:Connect(callback)
+
+    Connections[#Connections + 1] = connection
+
+    return connection
+end
+
+--------------------------------------------------------------------
+-- CHARACTER DETECTION
+--------------------------------------------------------------------
+
+local function refreshCharacters()
+
+    table.clear(CharacterCache)
+
+    for _, player in ipairs(Players:GetPlayers()) do
+
+        local character = player.Character
+
+        if character then
+            CharacterCache[character] = true
+        end
+    end
+end
+
+refreshCharacters()
+
+connect(Players.PlayerAdded, function(player)
+
+    connect(player.CharacterAdded, function()
+        task.defer(refreshCharacters)
+    end)
+
+end)
+
+connect(Players.PlayerRemoving, function()
+    task.defer(refreshCharacters)
+end)
+
+for _, player in ipairs(Players:GetPlayers()) do
+
+    connect(player.CharacterAdded, function()
+        task.defer(refreshCharacters)
+    end)
+
+end
+
+--------------------------------------------------------------------
+-- FAST CHARACTER CHECK
+--------------------------------------------------------------------
+
+local function isCharacterDescendant(instance)
+
+    local object = instance
+
+    while object and object ~= Workspace do
+
+        if CharacterCache[object] then
+            return true
+        end
+
+        object = object.Parent
+    end
+
+    return false
+end
+
+--------------------------------------------------------------------
+-- IMPORTANT OBJECT CHECK
+--------------------------------------------------------------------
+
+local ImportantNames = {
+
+    ["HumanoidRootPart"] = true,
+    ["Head"] = true,
+
+    ["Camera"] = true,
+
+    ["SpawnLocation"] = true,
+}
+
+local function isImportant(instance)
+
+    if ImportantNames[instance.Name] then
+        return true
+    end
+
+    if isCharacterDescendant(instance) then
+        return true
+    end
+
+    return false
+end
+
+--------------------------------------------------------------------
+-- FPS
+--------------------------------------------------------------------
+
+local function applyFPS()
+
+    if setfpscap then
+
+        pcall(function()
+            setfpscap(Config.FPS)
+        end)
+
+    end
+end
+
+applyFPS()
+
+--------------------------------------------------------------------
+-- QUALITY
+--------------------------------------------------------------------
+
+pcall(function()
+
+    settings().Rendering.QualityLevel =
+        Enum.QualityLevel.Level01
+
+end)
+
+--------------------------------------------------------------------
+-- LIGHTING
+--------------------------------------------------------------------
+
+local function optimizeLightingObject(object)
+
+    if object:IsA("BloomEffect")
+    or object:IsA("BlurEffect")
+    or object:IsA("SunRaysEffect")
+    or object:IsA("DepthOfFieldEffect")
+    or object:IsA("ColorCorrectionEffect") then
+
+        pcall(function()
+            object.Enabled = false
+        end)
+
+        return
+    end
+
+    if object:IsA("Atmosphere") then
+
+        pcall(function()
+
+            object.Density = 0
+            object.Haze = 0
+            object.Glare = 0
+
+        end)
+
+    end
+
+end
+
+local function optimizeLighting()
+
+    pcall(function()
+
+        Lighting.GlobalShadows = false
+
+        Lighting.EnvironmentDiffuseScale = 0
+        Lighting.EnvironmentSpecularScale = 0
+
+        Lighting.Brightness = 1
+
+        Lighting.FogStart = 0
+        Lighting.FogEnd = 1000000
+
+    end)
+
+    for _, object in ipairs(Lighting:GetChildren()) do
+        optimizeLightingObject(object)
+    end
+
+end
+
+optimizeLighting()
+
+connect(Lighting.ChildAdded, function(object)
+
+    task.defer(function()
+        optimizeLightingObject(object)
+    end)
+
+end)
+
+--------------------------------------------------------------------
+-- TERRAIN
+--------------------------------------------------------------------
+
+if Terrain then
+
+    pcall(function()
+
+        Terrain.WaterWaveSize = 0
+        Terrain.WaterWaveSpeed = 0
+
+        Terrain.WaterReflectance = 0
+        Terrain.WaterTransparency = 1
+
+        if Config.DisableTerrainDecoration then
+            Terrain.Decoration = false
+        end
+
+    end)
+
+end
+
+--------------------------------------------------------------------
+-- AUDIO
+--------------------------------------------------------------------
+
+if Config.DisableSounds then
+
+    pcall(function()
+        SoundService.Volume = 0
+    end)
+
+end
+
+--------------------------------------------------------------------
+-- OPTIMIZE SINGLE OBJECT
+--------------------------------------------------------------------
+
+local function optimizeInstance(object)
+
+    if not running then
+        return
+    end
+
+    if not object or not object.Parent then
+        return
+    end
+
+    ------------------------------------------------------------
+    -- PARTICLES
+    ------------------------------------------------------------
+
+    if Config.DisableParticles then
+
+        if object:IsA("ParticleEmitter")
+        or object:IsA("Smoke")
+        or object:IsA("Fire")
+        or object:IsA("Sparkles") then
+
+            pcall(function()
+                object.Enabled = false
+            end)
+
+            return
+        end
+
+    end
+
+    ------------------------------------------------------------
+    -- TRAILS
+    ------------------------------------------------------------
+
+    if Config.DisableTrails and object:IsA("Trail") then
+
+        pcall(function()
+            object.Enabled = false
+        end)
+
+        return
+    end
+
+    ------------------------------------------------------------
+    -- BEAMS
+    ------------------------------------------------------------
+
+    if Config.DisableBeams and object:IsA("Beam") then
+
+        pcall(function()
+            object.Enabled = false
+        end)
+
+        return
+    end
+
+    ------------------------------------------------------------
+    -- LIGHTS
+    ------------------------------------------------------------
+
+    if Config.DisableLights then
+
+        if object:IsA("PointLight")
+        or object:IsA("SpotLight")
+        or object:IsA("SurfaceLight") then
+
+            pcall(function()
+                object.Enabled = false
+            end)
+
+            return
+        end
+
+    end
+
+    ------------------------------------------------------------
+    -- TEXTURE / DECAL
+    ------------------------------------------------------------
+
+    if Config.HideTextures then
+
+        if object:IsA("Texture")
+        or object:IsA("Decal") then
+
+            pcall(function()
+                object.Transparency = 1
+            end)
+
+            return
+        end
+
+    end
+
+    ------------------------------------------------------------
+    -- BASEPART
+    ------------------------------------------------------------
+
+    if object:IsA("BasePart") then
+
+        if isImportant(object) then
+            return
+        end
+
+        pcall(function()
+
+            if Config.DisableShadows then
+                object.CastShadow = false
+            end
+
+            object.Reflectance = 0
+
+            if Config.SimplifyMaterials then
+
+                if object.Material ~= Enum.Material.SmoothPlastic then
+                    object.Material = Enum.Material.SmoothPlastic
+                end
+
+            end
+
+        end)
+
+        return
+    end
+
+    ------------------------------------------------------------
+    -- MESH
+    ------------------------------------------------------------
+
+    if object:IsA("SpecialMesh") and Config.HideTextures then
+
+        pcall(function()
+            object.TextureId = ""
+        end)
+
+        return
+    end
+
+    ------------------------------------------------------------
+    -- ANIMATIONS
+    ------------------------------------------------------------
+
+    if Config.DisableAnimations then
+
+        if object:IsA("Animator") then
+
+            pcall(function()
+
+                for _, animationTrack in ipairs(
+                    object:GetPlayingAnimationTracks()
+                ) do
+
+                    animationTrack:Stop(0)
+
+                end
+
+            end)
+
+        end
+
+    end
+
+end
+
+--------------------------------------------------------------------
+-- QUEUE
+--------------------------------------------------------------------
+
+local function queueObject(object)
+
+    if queued[object] then
+        return
+    end
+
+    queued[object] = true
+
+    processingQueue[#processingQueue + 1] = object
+end
+
+--------------------------------------------------------------------
+-- QUEUE PROCESSOR
+--------------------------------------------------------------------
+
+task.spawn(function()
+
+    while running do
+
+        local processed = 0
+
+        while
+            queueHead <= #processingQueue
+            and processed < Config.ProcessBatch
+        do
+
+            local object = processingQueue[queueHead]
+
+            processingQueue[queueHead] = nil
+
+            queueHead += 1
+
+            if object then
+
+                queued[object] = nil
+
+                optimizeInstance(object)
+
+            end
+
+            processed += 1
+
+        end
+
+        if queueHead > #processingQueue then
+
+            processingQueue = {}
+
+            queueHead = 1
+
+        end
+
+        task.wait(Config.BatchDelay)
+
+    end
+
+end)
+
+--------------------------------------------------------------------
+-- INITIAL SCAN
+--------------------------------------------------------------------
+
+task.spawn(function()
+
+    local descendants = Workspace:GetDescendants()
+
+    for i = 1, #descendants do
+
+        queueObject(descendants[i])
+
+        if i % 500 == 0 then
+            task.wait()
+        end
+
+    end
+
+end)
+
+--------------------------------------------------------------------
+-- ONLY PROCESS NEW OBJECTS
+--------------------------------------------------------------------
+
+connect(Workspace.DescendantAdded, function(object)
+
+    queueObject(object)
+
+end)
+
+--------------------------------------------------------------------
+-- OPTIONAL DISTANCE CULLING
+--------------------------------------------------------------------
+
+local CullParts = setmetatable({}, {
+    __mode = "k"
+})
+
+if Config.HideFarObjects then
+
+    task.spawn(function()
+
+        local descendants = Workspace:GetDescendants()
+
+        for i = 1, #descendants do
+
+            local object = descendants[i]
+
+            if object:IsA("BasePart")
+            and not isImportant(object) then
+
+                CullParts[object] = true
+
+            end
+
+            if i % 750 == 0 then
+                task.wait()
+            end
+
+        end
+
+        descendants = nil
+
+        while running do
+
+            task.wait(2.5)
+
+            local character = LocalPlayer.Character
+
+            local root =
+                character
+                and character:FindFirstChild("HumanoidRootPart")
+
+            if not root then
+                continue
+            end
+
+            local origin = root.Position
+
+            local processed = 0
+
+            for part in pairs(CullParts) do
+
+                if not part.Parent then
+
+                    CullParts[part] = nil
+
+                    OriginalTransparency[part] = nil
+
+                elseif isImportant(part) then
+
+                    CullParts[part] = nil
+
+                else
+
+                    local distance =
+                        (part.Position - origin).Magnitude
+
+                    if distance > Config.FarDistance then
+
+                        if OriginalTransparency[part] == nil then
+
+                            OriginalTransparency[part] =
+                                part.LocalTransparencyModifier
+
+                        end
+
+                        part.LocalTransparencyModifier = 1
+
+                    else
+
+                        local old =
+                            OriginalTransparency[part]
+
+                        if old ~= nil then
+
+                            part.LocalTransparencyModifier = old
+
+                            OriginalTransparency[part] = nil
+
+                        end
+
+                    end
+
+                end
+
+                processed += 1
+
+                if processed >= 300 then
+
+                    processed = 0
+
+                    task.wait()
+
+                end
+
+            end
+
+        end
+
+    end)
+
+    connect(Workspace.DescendantAdded, function(object)
+
+        if object:IsA("BasePart")
+        and not isImportant(object) then
+
+            CullParts[object] = true
+
+        end
+
+    end)
+
+end
+
+--------------------------------------------------------------------
+-- CAMERA OPTIMIZATION
+--------------------------------------------------------------------
+
+local function optimizeCamera()
+
+    local camera = Workspace.CurrentCamera
+
+    if not camera then
+        return
+    end
+
+    pcall(function()
+
+        camera.FieldOfView =
+            math.clamp(camera.FieldOfView, 40, 70)
+
+    end)
+
+end
+
+optimizeCamera()
+
+--------------------------------------------------------------------
+-- RESPAWN
+--------------------------------------------------------------------
+
+connect(LocalPlayer.CharacterAdded, function()
+
+    task.wait(1)
+
+    refreshCharacters()
+
+    applyFPS()
+
+end)
+
+--------------------------------------------------------------------
+-- LOW-FREQUENCY MAINTENANCE
+--------------------------------------------------------------------
+
+task.spawn(function()
+
+    while running do
+
+        task.wait(30)
+
+        optimizeLighting()
+
+        if Config.DisableSounds then
+
+            pcall(function()
+                SoundService.Volume = 0
+            end)
+
+        end
+
+    end
+
+end)
+
+--------------------------------------------------------------------
+-- MEMORY CLEANUP OF OUR OWN TABLES
+--------------------------------------------------------------------
+
+task.spawn(function()
+
+    while running do
+
+        task.wait(60)
+
+        for object in pairs(OriginalTransparency) do
+
+            if not object.Parent then
+                OriginalTransparency[object] = nil
+            end
+
+        end
+
+        for object in pairs(queued) do
+
+            if not object.Parent then
+                queued[object] = nil
+            end
+
+        end
+
+    end
+
+end)
+
+--------------------------------------------------------------------
+-- UNLOAD FUNCTION
+--------------------------------------------------------------------
+
+ENV.AXIOM_OPTIMIZER_UNLOAD = function()
+
+    running = false
+
+    for _, connection in ipairs(Connections) do
+
+        pcall(function()
+            connection:Disconnect()
+        end)
+
+    end
+
+    table.clear(Connections)
+
+    for object, transparency in pairs(OriginalTransparency) do
+
+        if object and object.Parent then
+
+            pcall(function()
+                object.LocalTransparencyModifier = transparency
+            end)
+
+        end
+
+    end
+
+    ENV.AXIOM_OPTIMIZER_LOADED = nil
+
+    print("[AXIOM] Optimizer unloaded.")
+
+end
+
+--------------------------------------------------------------------
+-- INFORMATION
+--------------------------------------------------------------------
+
+print("===================================================")
+print("[AXIOM] Universal Multi-Client Optimizer")
+print("[AXIOM] Profile :", PROFILE)
+print("[AXIOM] FPS     :", Config.FPS)
+print("[AXIOM] Loaded successfully.")
+print("===================================================")
