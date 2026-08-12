@@ -1,0 +1,2250 @@
+--=========================================================
+-- AXIOM KAITUN BLOX FRUITS A-Z V0.3 SECURITY KICK FIX
+--
+-- Mục tiêu:
+--   Fresh account -> Level 2800
+--   Auto Quest / Auto Farm / Fast Attack
+--   Auto Stats
+--   Auto Redeem
+--   Auto Haki / Abilities
+--   Auto Fighting Style buy (best-effort)
+--   Auto Random Fruit / Auto Store / Auto Pickup
+--   Auto Sea 1 -> Sea 2 -> Sea 3 (best-effort)
+--
+-- Thiết kế:
+--   * UI tối giản, không tab phức tạp.
+--   * Mỗi module chạy pcall riêng, lỗi module không giết toàn script.
+--   * Một movement owner duy nhất để tránh giật A -> B.
+--=========================================================
+
+if getgenv and getgenv().AXIOM_KAITUN_RUNNING then
+    warn("[AXIOM KAITUN] Already running.")
+    return
+end
+
+if getgenv then
+    getgenv().AXIOM_KAITUN_RUNNING = true
+end
+
+repeat task.wait() until game:IsLoaded()
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+
+local Player = Players.LocalPlayer
+repeat task.wait() until Player
+repeat task.wait() until Player:FindFirstChild("PlayerGui")
+
+local PlayerGui = Player.PlayerGui
+
+local CONFIG = {
+    Enabled = true,
+
+    Team = "Pirates",
+
+    MaxLevel = 2800,
+
+    TravelSpeed = 225,
+    VerticalSpeed = 250,
+    SafeHeight = 220,
+
+    FarmHeight = 7,
+    AttackRange = 14,
+    AttackDelay = 0.16,
+
+    AutoRedeem = true,
+    AutoStats = true,
+    AutoAbilities = true,
+    AutoFightingStyles = true,
+
+    AutoRandomFruit = true,
+    RandomFruitDelay = 90,
+
+    AutoStoreFruit = true,
+    AutoPickupFruit = true,
+
+    AutoSea = true,
+
+    -- Max 3 stats ở level cap.
+    StatOrder = {
+        "Melee",
+        "Defense",
+        "Sword",
+    },
+
+    StatBatch = 12,
+
+    RemoteMinInterval = 0.30,
+    StartupGrace = 12,
+}
+
+local STATE = {
+    Enabled = CONFIG.Enabled,
+    Paused = false,
+
+    Stage = "BOOT",
+    Detail = "Khởi động",
+
+    MovementOwner = nil,
+    TravelToken = 0,
+
+    LastAttack = 0,
+    LastQuest = 0,
+    LastRandomFruit = 0,
+    LastAbilityBuy = 0,
+    LastStyleBuy = 0,
+    LastRedeem = 0,
+
+    Redeemed = false,
+
+    LastQuestKey = nil,
+    LastCamp = nil,
+
+    Errors = {},
+
+    BootAt = os.clock(),
+    LastRemoteInvoke = 0,
+    AbilityIndex = 1,
+    StyleIndex = 1,
+}
+
+local PLACE_SEA1 = 2753915549
+local PLACE_SEA2 = 4442272183
+local PLACE_SEA3 = 7449423635
+
+local function setStage(stage, detail)
+    STATE.Stage = tostring(stage or "")
+    STATE.Detail = tostring(detail or "")
+end
+
+local function logError(tag, err)
+    STATE.Errors[tag] = tostring(err)
+    warn("[AXIOM KAITUN][" .. tostring(tag) .. "]", err)
+end
+
+local function safe(tag, fn)
+    local ok, result = pcall(fn)
+
+    if not ok then
+        logError(tag, result)
+        return false, result
+    end
+
+    return true, result
+end
+
+local function getCommF()
+    local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+
+    if not remotes then
+        return nil
+    end
+
+    return remotes:FindFirstChild("CommF_")
+end
+
+local function invoke(...)
+    local remote = getCommF()
+
+    if not remote then
+        return false, "NO_COMMF"
+    end
+
+    local elapsed = os.clock() - STATE.LastRemoteInvoke
+
+    if elapsed < CONFIG.RemoteMinInterval then
+        task.wait(CONFIG.RemoteMinInterval - elapsed)
+    end
+
+    STATE.LastRemoteInvoke = os.clock()
+
+    local args = table.pack(...)
+
+    return safe("CommF", function()
+        return remote:InvokeServer(
+            table.unpack(args, 1, args.n)
+        )
+    end)
+end
+
+local function getCharacter()
+    local character = Player.Character
+
+    if not character then
+        return nil
+    end
+
+    local humanoid =
+        character:FindFirstChildOfClass("Humanoid")
+
+    local root =
+        character:FindFirstChild("HumanoidRootPart")
+
+    if not humanoid or not root or humanoid.Health <= 0 then
+        return nil
+    end
+
+    return character, humanoid, root
+end
+
+local function getDataValue(name, default)
+    local data = Player:FindFirstChild("Data")
+    local value = data and data:FindFirstChild(name)
+
+    if value then
+        return value.Value
+    end
+
+    return default
+end
+
+local function getLevel()
+    return tonumber(getDataValue("Level", 1)) or 1
+end
+
+local function getBeli()
+    return tonumber(getDataValue("Beli", 0)) or 0
+end
+
+local function getFragments()
+    return tonumber(getDataValue("Fragments", 0)) or 0
+end
+
+local function getPoints()
+    return tonumber(getDataValue("Points", 0)) or 0
+end
+
+local function getSea()
+    if game.PlaceId == PLACE_SEA1 then
+        return 1
+    elseif game.PlaceId == PLACE_SEA2 then
+        return 2
+    elseif game.PlaceId == PLACE_SEA3 then
+        return 3
+    end
+
+    return 0
+end
+
+--=========================================================
+-- SIMPLE STABLE UI
+--=========================================================
+
+local old = PlayerGui:FindFirstChild("AxiomKaitunAZ")
+if old then
+    old:Destroy()
+end
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "AxiomKaitunAZ"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.IgnoreGuiInset = false
+ScreenGui.DisplayOrder = 999
+ScreenGui.Parent = PlayerGui
+
+local Main = Instance.new("Frame")
+Main.Size = UDim2.new(0, 385, 0, 230)
+Main.Position = UDim2.new(0.5, -192, 0.5, -115)
+Main.BackgroundColor3 = Color3.fromRGB(20, 20, 24)
+Main.BorderSizePixel = 0
+Main.Active = true
+Main.Draggable = true
+Main.Parent = ScreenGui
+
+local Corner = Instance.new("UICorner")
+Corner.CornerRadius = UDim.new(0, 12)
+Corner.Parent = Main
+
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(1, -20, 0, 38)
+Title.Position = UDim2.new(0, 10, 0, 6)
+Title.BackgroundTransparency = 1
+Title.Text = "AXIOM KAITUN • A → Z"
+Title.TextColor3 = Color3.fromRGB(240, 240, 245)
+Title.Font = Enum.Font.GothamBold
+Title.TextSize = 18
+Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.Parent = Main
+
+local Status = Instance.new("TextLabel")
+Status.Size = UDim2.new(1, -20, 0, 88)
+Status.Position = UDim2.new(0, 10, 0, 48)
+Status.BackgroundColor3 = Color3.fromRGB(28, 28, 34)
+Status.BorderSizePixel = 0
+Status.TextColor3 = Color3.fromRGB(205, 205, 215)
+Status.Font = Enum.Font.Gotham
+Status.TextSize = 12
+Status.TextWrapped = true
+Status.TextXAlignment = Enum.TextXAlignment.Left
+Status.TextYAlignment = Enum.TextYAlignment.Top
+Status.Parent = Main
+
+local StatusCorner = Instance.new("UICorner")
+StatusCorner.CornerRadius = UDim.new(0, 9)
+StatusCorner.Parent = Status
+
+local Toggle = Instance.new("TextButton")
+Toggle.Size = UDim2.new(0, 170, 0, 38)
+Toggle.Position = UDim2.new(0, 10, 1, -50)
+Toggle.BackgroundColor3 = Color3.fromRGB(45, 165, 120)
+Toggle.BorderSizePixel = 0
+Toggle.Text = "KAITUN: ON"
+Toggle.TextColor3 = Color3.fromRGB(255, 255, 255)
+Toggle.Font = Enum.Font.GothamBold
+Toggle.TextSize = 13
+Toggle.Parent = Main
+
+local ToggleCorner = Instance.new("UICorner")
+ToggleCorner.CornerRadius = UDim.new(0, 9)
+ToggleCorner.Parent = Toggle
+
+local Minimize = Instance.new("TextButton")
+Minimize.Size = UDim2.new(0, 170, 0, 38)
+Minimize.Position = UDim2.new(1, -180, 1, -50)
+Minimize.BackgroundColor3 = Color3.fromRGB(45, 45, 54)
+Minimize.BorderSizePixel = 0
+Minimize.Text = "Ẩn / Hiện"
+Minimize.TextColor3 = Color3.fromRGB(240, 240, 245)
+Minimize.Font = Enum.Font.GothamBold
+Minimize.TextSize = 13
+Minimize.Parent = Main
+
+local MinCorner = Instance.new("UICorner")
+MinCorner.CornerRadius = UDim.new(0, 9)
+MinCorner.Parent = Minimize
+
+local Rescue = Instance.new("TextButton")
+Rescue.Size = UDim2.new(0, 48, 0, 48)
+Rescue.Position = UDim2.new(0, 10, 0.5, -24)
+Rescue.BackgroundColor3 = Color3.fromRGB(40, 170, 125)
+Rescue.Text = "AZ"
+Rescue.TextColor3 = Color3.new(1, 1, 1)
+Rescue.Font = Enum.Font.GothamBold
+Rescue.TextSize = 14
+Rescue.BorderSizePixel = 0
+Rescue.Visible = false
+Rescue.Parent = ScreenGui
+
+local RescueCorner = Instance.new("UICorner")
+RescueCorner.CornerRadius = UDim.new(1, 0)
+RescueCorner.Parent = Rescue
+
+Toggle.MouseButton1Click:Connect(function()
+    STATE.Enabled = not STATE.Enabled
+
+    Toggle.Text =
+        STATE.Enabled
+        and "KAITUN: ON"
+        or "KAITUN: OFF"
+
+    Toggle.BackgroundColor3 =
+        STATE.Enabled
+        and Color3.fromRGB(45, 165, 120)
+        or Color3.fromRGB(155, 65, 65)
+end)
+
+Minimize.MouseButton1Click:Connect(function()
+    Main.Visible = false
+    Rescue.Visible = true
+end)
+
+Rescue.MouseButton1Click:Connect(function()
+    Main.Visible = true
+    Rescue.Visible = false
+end)
+
+task.spawn(function()
+    while ScreenGui.Parent do
+        local level = getLevel()
+        local sea = getSea()
+
+        Status.Text =
+            "Stage: " .. STATE.Stage ..
+            "\n" ..
+            STATE.Detail ..
+            "\nLv." .. tostring(level) ..
+            " / " .. tostring(CONFIG.MaxLevel) ..
+            " | Sea " .. tostring(sea) ..
+            " | Beli " .. tostring(getBeli()) ..
+            " | Frag " .. tostring(getFragments())
+
+        task.wait(0.25)
+    end
+end)
+
+--=========================================================
+-- TEAM AUTO SELECT
+--=========================================================
+
+local function chooseTeam()
+    local main = PlayerGui:FindFirstChild("Main")
+
+    if not main then
+        return
+    end
+
+    local choose = main:FindFirstChild("ChooseTeam", true)
+
+    if not choose or not choose.Visible then
+        return
+    end
+
+    local wanted =
+        string.lower(CONFIG.Team or "Pirates")
+
+    for _, obj in ipairs(choose:GetDescendants()) do
+        if obj:IsA("TextButton") then
+            local text =
+                string.lower(
+                    tostring(obj.Text or obj.Name)
+                )
+
+            if string.find(text, wanted, 1, true) then
+                safe("ChooseTeam", function()
+                    obj:Activate()
+                end)
+
+                return
+            end
+        end
+    end
+end
+
+task.spawn(function()
+    while ScreenGui.Parent do
+        safe("Team", chooseTeam)
+        task.wait(2)
+    end
+end)
+
+--=========================================================
+-- QUEST DATABASE
+--=========================================================
+
+local QUESTS = {
+    -- SEA 1
+    {1,    9,    "Bandit",                 "BanditQuest1",        1, CFrame.new(1059.37, 15.45, 1550.42)},
+    {10,   14,   "Monkey",                 "JungleQuest",         1, CFrame.new(-1601.66, 36.85, 153.39)},
+    {15,   29,   "Gorilla",                "JungleQuest",         2, CFrame.new(-1601.66, 36.85, 153.39)},
+    {30,   39,   "Pirate",                 "BuggyQuest1",         1, CFrame.new(-1140.18, 4.75, 3827.41)},
+    {40,   59,   "Brute",                  "BuggyQuest1",         2, CFrame.new(-1140.18, 4.75, 3827.41)},
+    {60,   74,   "Desert Bandit",          "DesertQuest",         1, CFrame.new(894.49, 5.14, 4392.43)},
+    {75,   89,   "Desert Officer",         "DesertQuest",         2, CFrame.new(894.49, 5.14, 4392.43)},
+    {90,   99,   "Snow Bandit",            "SnowQuest",           1, CFrame.new(1389.74, 88.15, -1298.91)},
+    {100,  119,  "Snowman",                "SnowQuest",           2, CFrame.new(1389.74, 88.15, -1298.91)},
+    {120,  149,  "Chief Petty Officer",     "MarineQuest2",        1, CFrame.new(-5039.59, 27.35, 4324.68)},
+    {150,  174,  "Sky Bandit",             "SkyQuest",            1, CFrame.new(-4839.53, 716.37, -2619.44)},
+    {175,  189,  "Dark Master",            "SkyQuest",            2, CFrame.new(-4839.53, 716.37, -2619.44)},
+    {190,  209,  "Prisoner",               "PrisonerQuest",       1, CFrame.new(5308.93, 1.66, 475.12)},
+    {210,  249,  "Dangerous Prisoner",     "PrisonerQuest",       2, CFrame.new(5308.93, 1.66, 475.12)},
+    {250,  274,  "Toga Warrior",           "ColosseumQuest",      1, CFrame.new(-1576.12, 7.39, -2983.31)},
+    {275,  299,  "Gladiator",              "ColosseumQuest",      2, CFrame.new(-1576.12, 7.39, -2983.31)},
+    {300,  324,  "Military Soldier",       "MagmaQuest",          1, CFrame.new(-5313.37, 10.95, 8515.29)},
+    {325,  374,  "Military Spy",           "MagmaQuest",          2, CFrame.new(-5313.37, 10.95, 8515.29)},
+    {375,  399,  "Fishman Warrior",        "FishmanQuest",        1, CFrame.new(61122.65, 18.50, 1569.40)},
+    {400,  449,  "Fishman Commando",       "FishmanQuest",        2, CFrame.new(61122.65, 18.50, 1569.40)},
+    {450,  474,  "God's Guard",            "SkyExp1Quest",        1, CFrame.new(-4721.89, 843.87, -1949.97)},
+    {475,  524,  "Shanda",                 "SkyExp1Quest",        2, CFrame.new(-7859.10, 5544.19, -381.48)},
+    {525,  549,  "Royal Squad",            "SkyExp2Quest",        1, CFrame.new(-7906.82, 5634.66, -1411.99)},
+    {550,  624,  "Royal Soldier",          "SkyExp2Quest",        2, CFrame.new(-7906.82, 5634.66, -1411.99)},
+    {625,  649,  "Galley Pirate",          "FountainQuest",       1, CFrame.new(5254.60, 38.50, 4049.70)},
+    {650,  699,  "Galley Captain",         "FountainQuest",       2, CFrame.new(5254.60, 38.50, 4049.70)},
+
+    -- SEA 2
+    {700,  724,  "Raider",                 "Area1Quest",          1, CFrame.new(-424.08, 73.01, 1836.92)},
+    {725,  774,  "Mercenary",              "Area1Quest",          2, CFrame.new(-424.08, 73.01, 1836.92)},
+    {775,  799,  "Swan Pirate",            "Area2Quest",          1, CFrame.new(632.70, 73.11, 918.67)},
+    {800,  874,  "Factory Staff",          "Area2Quest",          2, CFrame.new(632.70, 73.11, 918.67)},
+    {875,  899,  "Marine Lieutenant",      "MarineQuest3",        1, CFrame.new(-2440.80, 71.71, -3216.07)},
+    {900,  949,  "Marine Captain",         "MarineQuest3",        2, CFrame.new(-2440.80, 71.71, -3216.07)},
+    {950,  974,  "Zombie",                 "ZombieQuest",         1, CFrame.new(-5492.79, 48.52, -793.71)},
+    {975,  999,  "Vampire",                "ZombieQuest",         2, CFrame.new(-5492.79, 48.52, -793.71)},
+    {1000, 1049, "Snow Trooper",           "SnowMountainQuest",   1, CFrame.new(609.86, 400.12, -5372.26)},
+    {1050, 1099, "Winter Warrior",         "SnowMountainQuest",   2, CFrame.new(609.86, 400.12, -5372.26)},
+    {1100, 1124, "Lab Subordinate",        "IceSideQuest",        1, CFrame.new(-6064.07, 15.24, -4902.98)},
+    {1125, 1174, "Horned Warrior",         "IceSideQuest",        2, CFrame.new(-6064.07, 15.24, -4902.98)},
+    {1175, 1199, "Magma Ninja",            "FireSideQuest",       1, CFrame.new(-5428.03, 15.06, -5299.43)},
+    {1200, 1249, "Lava Pirate",            "FireSideQuest",       2, CFrame.new(-5428.03, 15.06, -5299.43)},
+    {1250, 1274, "Ship Deckhand",          "ShipQuest1",          1, CFrame.new(1037.80, 125.09, 32911.60)},
+    {1275, 1299, "Ship Engineer",          "ShipQuest1",          2, CFrame.new(1037.80, 125.09, 32911.60)},
+    {1300, 1324, "Ship Steward",           "ShipQuest2",          1, CFrame.new(968.81, 125.09, 33244.13)},
+    {1325, 1349, "Ship Officer",           "ShipQuest2",          2, CFrame.new(968.81, 125.09, 33244.13)},
+    {1350, 1374, "Arctic Warrior",         "FrostQuest",          1, CFrame.new(5667.66, 26.80, -6486.09)},
+    {1375, 1424, "Snow Lurker",            "FrostQuest",          2, CFrame.new(5667.66, 26.80, -6486.09)},
+    {1425, 1449, "Sea Soldier",            "ForgottenQuest",      1, CFrame.new(-3054.44, 235.54, -10142.82)},
+    {1450, 1499, "Water Fighter",          "ForgottenQuest",      2, CFrame.new(-3054.44, 235.54, -10142.82)},
+
+    -- SEA 3
+    {1500, 1524, "Pirate Millionaire",     "PiratePortQuest",     1, CFrame.new(-290.07, 42.90, 5581.59)},
+    {1525, 1574, "Pistol Billionaire",     "PiratePortQuest",     2, CFrame.new(-290.07, 42.90, 5581.59)},
+    {1575, 1599, "Dragon Crew Warrior",    "DragonCrewQuest",     1, CFrame.new(6737.78, 127.43, -713.23)},
+    {1600, 1624, "Dragon Crew Archer",     "DragonCrewQuest",     2, CFrame.new(6737.78, 127.43, -713.23)},
+    {1625, 1649, "Hydra Enforcer",         "VenomCrewQuest",      1, CFrame.new(5212.94, 1004.12, 755.67)},
+    {1650, 1699, "Venomous Assailant",     "VenomCrewQuest",      2, CFrame.new(5212.94, 1004.12, 755.67)},
+    {1700, 1724, "Marine Commodore",       "MarineTreeIsland",    1, CFrame.new(2484.07, 74.28, -6786.64)},
+    {1725, 1774, "Marine Rear Admiral",    "MarineTreeIsland",    2, CFrame.new(2484.07, 74.28, -6786.64)},
+    {1775, 1799, "Fishman Raider",         "DeepForestIsland3",   1, CFrame.new(-10581.66, 330.87, -8761.19)},
+    {1800, 1824, "Fishman Captain",        "DeepForestIsland3",   2, CFrame.new(-10581.66, 330.87, -8761.19)},
+    {1825, 1849, "Forest Pirate",          "DeepForestIsland",    1, CFrame.new(-13234.04, 331.49, -7625.40)},
+    {1850, 1899, "Mythological Pirate",    "DeepForestIsland",    2, CFrame.new(-13234.04, 331.49, -7625.40)},
+    {1900, 1924, "Jungle Pirate",          "DeepForestIsland2",   1, CFrame.new(-12680.38, 389.97, -9902.02)},
+    {1925, 1974, "Musketeer Pirate",       "DeepForestIsland2",   2, CFrame.new(-12680.38, 389.97, -9902.02)},
+    {1975, 1999, "Reborn Skeleton",        "HauntedQuest1",       1, CFrame.new(-9479.22, 141.22, 5566.09)},
+    {2000, 2024, "Living Zombie",          "HauntedQuest1",       2, CFrame.new(-9479.22, 141.22, 5566.09)},
+    {2025, 2049, "Demonic Soul",           "HauntedQuest2",       1, CFrame.new(-9516.99, 172.02, 6078.47)},
+    {2050, 2074, "Posessed Mummy",         "HauntedQuest2",       2, CFrame.new(-9516.99, 172.02, 6078.47)},
+    {2075, 2099, "Peanut Scout",           "NutsIslandQuest",     1, CFrame.new(-2104.36, 38.13, -10194.07)},
+    {2100, 2124, "Peanut President",       "NutsIslandQuest",     2, CFrame.new(-2104.36, 38.13, -10194.07)},
+    {2125, 2149, "Ice Cream Chef",         "IceCreamIslandQuest", 1, CFrame.new(-820.22, 65.85, -10966.17)},
+    {2150, 2199, "Ice Cream Commander",    "IceCreamIslandQuest", 2, CFrame.new(-820.22, 65.85, -10966.17)},
+    {2200, 2224, "Cookie Crafter",         "CakeQuest1",          1, CFrame.new(-2021.32, 37.80, -12028.73)},
+    {2225, 2249, "Cake Guard",             "CakeQuest1",          2, CFrame.new(-2021.32, 37.80, -12028.73)},
+    {2250, 2274, "Baking Staff",           "CakeQuest2",          1, CFrame.new(-1927.92, 37.80, -12842.54)},
+    {2275, 2299, "Head Baker",             "CakeQuest2",          2, CFrame.new(-1927.92, 37.80, -12842.54)},
+    {2300, 2324, "Cocoa Warrior",          "ChocQuest1",          1, CFrame.new(233.23, 29.88, -12201.23)},
+    {2325, 2349, "Chocolate Bar Battler",  "ChocQuest1",          2, CFrame.new(233.23, 29.88, -12201.23)},
+    {2350, 2374, "Sweet Thief",            "ChocQuest2",          1, CFrame.new(150.51, 30.69, -12774.50)},
+    {2375, 2399, "Candy Rebel",            "ChocQuest2",          2, CFrame.new(150.51, 30.69, -12774.50)},
+    {2400, 2424, "Candy Pirate",           "CandyQuest1",         1, CFrame.new(-1150.04, 20.38, -14446.33)},
+    {2425, 2449, "Snow Demon",             "CandyQuest1",         2, CFrame.new(-1150.04, 20.38, -14446.33)},
+    {2450, 2474, "Isle Outlaw",            "TikiQuest1",          1, CFrame.new(-16547.75, 61.14, -173.41)},
+    {2475, 2499, "Island Boy",             "TikiQuest1",          2, CFrame.new(-16547.75, 61.14, -173.41)},
+    {2500, 2524, "Sun-kissed Warrior",     "TikiQuest2",          1, CFrame.new(-16539.08, 55.69, 1051.57)},
+    {2525, 2549, "Isle Champion",          "TikiQuest2",          2, CFrame.new(-16539.08, 55.69, 1051.57)},
+    {2550, 2574, "Serpent Hunter",         "TikiQuest3",          1, CFrame.new(-16668.03, 105.32, 1568.60)},
+    {2575, 2599, "Skull Slayer",           "TikiQuest3",          2, CFrame.new(-16668.03, 105.32, 1568.60)},
+
+    -- SUBMERGED ISLAND
+    {2600, 2624, "Reef Bandit",            "SubmergedQuest1",     1, CFrame.new(10882.26, -2086.32, 10034.23)},
+    {2625, 2649, "Coral Pirate",           "SubmergedQuest1",     2, CFrame.new(10882.26, -2086.32, 10034.23)},
+    {2650, 2674, "Sea Chanter",            "SubmergedQuest2",     1, CFrame.new(10882.26, -2086.32, 10034.23)},
+    {2675, 2699, "Ocean Prophet",          "SubmergedQuest2",     2, CFrame.new(10882.26, -2086.32, 10034.23)},
+    {2700, 2724, "High Disciple",          "SubmergedQuest3",     1, CFrame.new(9636.52, -1992.20, 9609.53)},
+    {2725, 2800, "Grand Devotee",          "SubmergedQuest3",     2, CFrame.new(9636.52, -1992.20, 9609.53)},
+}
+
+
+local MOB_SPAWNS = {
+    -- SEA 1
+    ["Bandit"] = CFrame.new(1145, 17, 1634),
+    ["Monkey"] = CFrame.new(-1496, 39, 35),
+    ["Gorilla"] = CFrame.new(-1237, 7, -486),
+    ["Pirate"] = CFrame.new(-1115, 14, 3938),
+    ["Brute"] = CFrame.new(-1145, 15, 4350),
+    ["Desert Bandit"] = CFrame.new(984, 16, 4418),
+    ["Desert Officer"] = CFrame.new(1547, 14, 4382),
+    ["Snow Bandit"] = CFrame.new(1356, 106, -1328),
+    ["Snowman"] = CFrame.new(1219, 138, -1488),
+    ["Chief Petty Officer"] = CFrame.new(-4931, 66, 4122),
+    ["Sky Bandit"] = CFrame.new(-4956, 365, -2908),
+    ["Dark Master"] = CFrame.new(-5148, 439, -2333),
+    ["Prisoner"] = CFrame.new(4937, 1, 650),
+    ["Dangerous Prisoner"] = CFrame.new(5100, 1, 1056),
+    ["Toga Warrior"] = CFrame.new(-1873, 49, -2914),
+    ["Gladiator"] = CFrame.new(-1521, 81, -3066),
+    ["Military Soldier"] = CFrame.new(-5369, 61, 8556),
+    ["Military Spy"] = CFrame.new(-5787, 76, 8652),
+    ["Fishman Warrior"] = CFrame.new(60844, 98, 1298),
+    ["Fishman Commando"] = CFrame.new(61738, 64, 1434),
+    ["God's Guard"] = CFrame.new(-4628, 867, -1931),
+    ["Shanda"] = CFrame.new(-7685, 5601, -441),
+    ["Royal Squad"] = CFrame.new(-7685, 5607, -1443),
+    ["Royal Soldier"] = CFrame.new(-7828, 5607, -1744),
+    ["Galley Pirate"] = CFrame.new(5589, 45, 3996),
+    ["Galley Captain"] = CFrame.new(5678, 93, 4967),
+
+    -- SEA 2
+    ["Raider"] = CFrame.new(-737, 39, 2393),
+    ["Mercenary"] = CFrame.new(-874, 141, 1312),
+    ["Swan Pirate"] = CFrame.new(878, 122, 1235),
+    ["Factory Staff"] = CFrame.new(295, 73, -56),
+    ["Marine Lieutenant"] = CFrame.new(-2489, 85, -3152),
+    ["Marine Captain"] = CFrame.new(-2335, 80, -3246),
+    ["Zombie"] = CFrame.new(-5536, 101, -836),
+    ["Vampire"] = CFrame.new(-6033, 7, -1317),
+    ["Snow Trooper"] = CFrame.new(478, 402, -5362),
+    ["Winter Warrior"] = CFrame.new(1157, 430, -5188),
+    ["Lab Subordinate"] = CFrame.new(-5782, 42, -4484),
+    ["Horned Warrior"] = CFrame.new(-6406, 24, -5805),
+    ["Magma Ninja"] = CFrame.new(-5428, 78, -5959),
+    ["Lava Pirate"] = CFrame.new(-5270, 42, -4800),
+    ["Ship Deckhand"] = CFrame.new(1198, 126, 33031),
+    ["Ship Engineer"] = CFrame.new(918, 44, 32787),
+    ["Ship Steward"] = CFrame.new(915, 130, 33419),
+    ["Ship Officer"] = CFrame.new(916, 181, 33335),
+    ["Arctic Warrior"] = CFrame.new(6038, 29, -6231),
+    ["Snow Lurker"] = CFrame.new(5518, 61, -6829),
+    ["Sea Soldier"] = CFrame.new(-3030, 191, -9860),
+    ["Water Fighter"] = CFrame.new(-3437, 291, -10503),
+
+    -- SEA 3
+    ["Pirate Millionaire"] = CFrame.new(81, 44, 5725),
+    ["Pistol Billionaire"] = CFrame.new(-237, 217, 6006),
+    ["Dragon Crew Warrior"] = CFrame.new(6302, 105, -1083),
+    ["Dragon Crew Archer"] = CFrame.new(6831, 442, 447),
+    ["Hydra Enforcer"] = CFrame.new(5825, 683, 705),
+    ["Venomous Assailant"] = CFrame.new(5009, 664, -41),
+    ["Marine Commodore"] = CFrame.new(2447, 73, -7470),
+    ["Marine Rear Admiral"] = CFrame.new(3671, 161, -6932),
+    ["Fishman Raider"] = CFrame.new(-10560, 332, -8466),
+    ["Fishman Captain"] = CFrame.new(-10993, 332, -8940),
+    ["Forest Pirate"] = CFrame.new(-13479, 333, -7905),
+    ["Mythological Pirate"] = CFrame.new(-13545, 470, -6917),
+    ["Jungle Pirate"] = CFrame.new(-12107, 332, -10549),
+    ["Musketeer Pirate"] = CFrame.new(-13286, 392, -9769),
+    ["Reborn Skeleton"] = CFrame.new(-8760, 142, 6039),
+    ["Living Zombie"] = CFrame.new(-10144, 140, 5932),
+    ["Demonic Soul"] = CFrame.new(-9507, 172, 6158),
+    ["Posessed Mummy"] = CFrame.new(-9577, 6, 6223),
+    ["Peanut Scout"] = CFrame.new(-2124, 123, -10435),
+    ["Peanut President"] = CFrame.new(-2124, 123, -10435),
+    ["Ice Cream Chef"] = CFrame.new(-641, 127, -11062),
+    ["Ice Cream Commander"] = CFrame.new(-641, 127, -11062),
+    ["Cookie Crafter"] = CFrame.new(-2365, 38, -12099),
+    ["Cake Guard"] = CFrame.new(-1651, 38, -12308),
+    ["Baking Staff"] = CFrame.new(-1870, 38, -12938),
+    ["Head Baker"] = CFrame.new(-1926, 88, -12850),
+    ["Cocoa Warrior"] = CFrame.new(231, 23, -12194),
+    ["Chocolate Bar Battler"] = CFrame.new(231, 23, -12194),
+    ["Sweet Thief"] = CFrame.new(71, 77, -12632),
+    ["Candy Rebel"] = CFrame.new(134, 77, -12882),
+    ["Candy Pirate"] = CFrame.new(-1438, 17, -14386),
+    ["Snow Demon"] = CFrame.new(-916, 17, -14639),
+    ["Isle Outlaw"] = CFrame.new(-16122, 11, -257),
+    ["Island Boy"] = CFrame.new(-16736, 21, -132),
+    ["Sun-kissed Warrior"] = CFrame.new(-16414, 55, 1054),
+    ["Isle Champion"] = CFrame.new(-16787, 21, 992),
+    ["Serpent Hunter"] = CFrame.new(-16655, 105, 1580),
+    ["Skull Slayer"] = CFrame.new(-16655, 105, 1580),
+
+    -- Submerged: dùng quest area làm điểm stream fallback.
+    ["Reef Bandit"] = CFrame.new(10882, -2086, 10034),
+    ["Coral Pirate"] = CFrame.new(10882, -2086, 10034),
+    ["Sea Chanter"] = CFrame.new(10882, -2086, 10034),
+    ["Ocean Prophet"] = CFrame.new(10882, -2086, 10034),
+    ["High Disciple"] = CFrame.new(9637, -1992, 9610),
+    ["Grand Devotee"] = CFrame.new(9637, -1992, 9610),
+}
+
+
+local function resolveQuest(level)
+    for _, q in ipairs(QUESTS) do
+        if level >= q[1] and level <= q[2] then
+            return {
+                Min = q[1],
+                Max = q[2],
+                Mob = q[3],
+                Quest = q[4],
+                Index = q[5],
+                CFrame = q[6],
+            }
+        end
+    end
+
+    return nil
+end
+
+local function getQuestGui()
+    local main = PlayerGui:FindFirstChild("Main")
+    return main and main:FindFirstChild("Quest")
+end
+
+local function questVisible()
+    local quest = getQuestGui()
+
+    if not quest then
+        return false
+    end
+
+    local ok, visible = pcall(function()
+        return quest.Visible
+    end)
+
+    return ok and visible
+end
+
+local function questText()
+    local quest = getQuestGui()
+
+    if not quest then
+        return ""
+    end
+
+    local texts = {}
+
+    for _, obj in ipairs(quest:GetDescendants()) do
+        if obj:IsA("TextLabel")
+            or obj:IsA("TextButton") then
+
+            if obj.Text and obj.Text ~= "" then
+                table.insert(texts, obj.Text)
+            end
+        end
+    end
+
+    return table.concat(texts, " ")
+end
+
+local function questMatches(q)
+    if not q or not questVisible() then
+        return false
+    end
+
+    return string.find(
+        string.lower(questText()),
+        string.lower(q.Mob),
+        1,
+        true
+    ) ~= nil
+end
+
+--=========================================================
+-- MOVEMENT ENGINE
+--=========================================================
+
+local function setMovementOwner(owner)
+    if STATE.MovementOwner
+        and STATE.MovementOwner ~= owner then
+
+        return false
+    end
+
+    STATE.MovementOwner = owner
+    return true
+end
+
+local function releaseMovement(owner)
+    if STATE.MovementOwner == owner then
+        STATE.MovementOwner = nil
+    end
+end
+
+local function flatCFrame(position, source)
+    local look =
+        source and source.LookVector
+        or Vector3.new(0, 0, -1)
+
+    local flat =
+        Vector3.new(
+            look.X,
+            0,
+            look.Z
+        )
+
+    if flat.Magnitude < 0.01 then
+        flat = Vector3.new(0, 0, -1)
+    else
+        flat = flat.Unit
+    end
+
+    return CFrame.lookAt(
+        position,
+        position + flat
+    )
+end
+
+local function tweenPhase(root, cf, speed, token)
+    if not root
+        or not root.Parent
+        or token ~= STATE.TravelToken then
+
+        return false
+    end
+
+    local distance =
+        (root.Position - cf.Position).Magnitude
+
+    if distance <= 3 then
+        root.CFrame = cf
+        return true
+    end
+
+    local tween =
+        TweenService:Create(
+            root,
+            TweenInfo.new(
+                math.clamp(
+                    distance / speed,
+                    0.08,
+                    30
+                ),
+                Enum.EasingStyle.Linear
+            ),
+            {CFrame = cf}
+        )
+
+    tween:Play()
+
+    local state = tween.Completed:Wait()
+
+    return token == STATE.TravelToken
+        and state == Enum.PlaybackState.Completed
+end
+
+local function travelTo(owner, destination)
+    local character, humanoid, root =
+        getCharacter()
+
+    if not root then
+        return false
+    end
+
+    if not setMovementOwner(owner) then
+        return false
+    end
+
+    STATE.TravelToken += 1
+    local token = STATE.TravelToken
+
+    pcall(function()
+        humanoid.Sit = false
+        humanoid.AutoRotate = false
+        root.AssemblyLinearVelocity = Vector3.zero
+        root.AssemblyAngularVelocity = Vector3.zero
+    end)
+
+    local start = root.Position
+    local target = destination.Position
+
+    local horizontal =
+        (
+            Vector2.new(start.X, start.Z)
+            - Vector2.new(target.X, target.Z)
+        ).Magnitude
+
+    local ok = true
+
+    if horizontal > 450 then
+        local safeY =
+            math.max(
+                CONFIG.SafeHeight,
+                start.Y + 120,
+                target.Y + 120
+            )
+
+        ok = tweenPhase(
+            root,
+            flatCFrame(
+                Vector3.new(start.X, safeY, start.Z),
+                root.CFrame
+            ),
+            CONFIG.VerticalSpeed,
+            token
+        )
+
+        if ok then
+            ok = tweenPhase(
+                root,
+                flatCFrame(
+                    Vector3.new(target.X, safeY, target.Z),
+                    root.CFrame
+                ),
+                CONFIG.TravelSpeed,
+                token
+            )
+        end
+
+        if ok then
+            ok = tweenPhase(
+                root,
+                flatCFrame(target, destination),
+                CONFIG.VerticalSpeed,
+                token
+            )
+        end
+    else
+        ok = tweenPhase(
+            root,
+            flatCFrame(target, destination),
+            CONFIG.TravelSpeed,
+            token
+        )
+    end
+
+    pcall(function()
+        root.AssemblyLinearVelocity = Vector3.zero
+        root.AssemblyAngularVelocity = Vector3.zero
+        humanoid.AutoRotate = true
+    end)
+
+    releaseMovement(owner)
+
+    return ok
+end
+
+local function cancelTravel()
+    STATE.TravelToken += 1
+    STATE.MovementOwner = nil
+end
+
+local function specialEntrance(q)
+    if not q then
+        return
+    end
+
+    if q.Mob == "Fishman Warrior"
+        or q.Mob == "Fishman Commando" then
+
+        invoke(
+            "requestEntrance",
+            Vector3.new(
+                61163.8516,
+                11.6797,
+                1819.7842
+            )
+        )
+
+    elseif q.Mob == "God's Guard" then
+        invoke(
+            "requestEntrance",
+            Vector3.new(
+                -4607.8228,
+                872.5425,
+                -1667.5569
+            )
+        )
+
+    elseif q.Mob == "Shanda"
+        or q.Mob == "Royal Squad"
+        or q.Mob == "Royal Soldier" then
+
+        invoke(
+            "requestEntrance",
+            Vector3.new(
+                -7894.6177,
+                5547.1416,
+                -380.2912
+            )
+        )
+
+    elseif string.find(q.Mob, "Ship", 1, true) then
+        invoke(
+            "requestEntrance",
+            Vector3.new(
+                923.2125,
+                126.9760,
+                32852.8320
+            )
+        )
+    end
+end
+
+--=========================================================
+-- TOOL + COMBAT
+--=========================================================
+
+local function equipBestTool()
+    local character, humanoid =
+        getCharacter()
+
+    if not character or not humanoid then
+        return nil
+    end
+
+    local backpack =
+        Player:FindFirstChild("Backpack")
+
+    local preferred = {
+        "Sanguine Art",
+        "Godhuman",
+        "Electric Claw",
+        "Sharkman Karate",
+        "Death Step",
+        "Dragon Talon",
+        "Superhuman",
+        "Dragon Claw",
+        "Fishman Karate",
+        "Electro",
+        "Black Leg",
+        "Combat",
+    }
+
+    for _, name in ipairs(preferred) do
+        local tool =
+            character:FindFirstChild(name)
+            or (backpack and backpack:FindFirstChild(name))
+
+        if tool and tool:IsA("Tool") then
+            if tool.Parent == backpack then
+                humanoid:EquipTool(tool)
+                task.wait()
+            end
+
+            return tool
+        end
+    end
+
+    if backpack then
+        for _, tool in ipairs(backpack:GetChildren()) do
+            if tool:IsA("Tool")
+                and not tool:FindFirstChild("Fruit") then
+
+                humanoid:EquipTool(tool)
+                task.wait()
+                return tool
+            end
+        end
+    end
+
+    return character:FindFirstChildOfClass("Tool")
+end
+
+local function enemyMatches(enemy, wanted)
+    if not enemy
+        or not enemy:IsA("Model") then
+
+        return false
+    end
+
+    return string.find(
+        string.lower(enemy.Name),
+        string.lower(wanted),
+        1,
+        true
+    ) ~= nil
+end
+
+local function getEnemiesFolder()
+    return Workspace:FindFirstChild("Enemies")
+end
+
+local function getTargets(wanted, origin)
+    local result = {}
+    local folder = getEnemiesFolder()
+
+    if not folder then
+        return result
+    end
+
+    for _, enemy in ipairs(folder:GetChildren()) do
+        if enemyMatches(enemy, wanted) then
+            local hum =
+                enemy:FindFirstChildOfClass("Humanoid")
+
+            local root =
+                enemy:FindFirstChild("HumanoidRootPart")
+
+            if hum
+                and root
+                and hum.Health > 0 then
+
+                table.insert(result, {
+                    Enemy = enemy,
+                    Humanoid = hum,
+                    Root = root,
+                    Distance =
+                        (root.Position - origin).Magnitude,
+                })
+            end
+        end
+    end
+
+    table.sort(result, function(a, b)
+        return a.Distance < b.Distance
+    end)
+
+    return result
+end
+
+local function getClosestCombatTarget(targets, root)
+    if not root or type(targets) ~= "table" then
+        return nil
+    end
+
+    for _, data in ipairs(targets) do
+        local enemy = data.Enemy
+        local humanoid = data.Humanoid
+        local enemyRoot = data.Root
+
+        if enemy
+            and enemy.Parent
+            and humanoid
+            and humanoid.Health > 0
+            and enemyRoot
+            and enemyRoot.Parent then
+
+            local distance =
+                (enemyRoot.Position - root.Position).Magnitude
+
+            if distance <= CONFIG.AttackRange then
+                return data
+            end
+        end
+    end
+
+    return nil
+end
+
+local function attack(tool, targets, root)
+    if not tool
+        or not tool.Parent
+        or not root
+        or os.clock() - STATE.LastAttack < CONFIG.AttackDelay then
+
+        return false, "COOLDOWN"
+    end
+
+    local character = Player.Character
+
+    if not character then
+        return false, "NO_CHARACTER"
+    end
+
+    if tool.Parent ~= character then
+        local humanoid =
+            character:FindFirstChildOfClass("Humanoid")
+
+        if humanoid then
+            safe("EquipAttackTool", function()
+                humanoid:EquipTool(tool)
+            end)
+
+            task.wait(0.05)
+        end
+    end
+
+    if tool.Parent ~= character then
+        return false, "TOOL_NOT_EQUIPPED"
+    end
+
+    local target =
+        getClosestCombatTarget(targets, root)
+
+    if not target then
+        return false, "TOO_FAR"
+    end
+
+    STATE.LastAttack = os.clock()
+
+    -- Security-kick recovery:
+    -- use normal Tool activation only; no fabricated combat remotes.
+    local ok, err = pcall(function()
+        tool:Activate()
+    end)
+
+    if not ok then
+        return false, "ACTIVATE_ERROR:" .. tostring(err)
+    end
+
+    return true, "NORMAL"
+end
+
+local function hoverTarget(target)
+    local character, humanoid, root =
+        getCharacter()
+
+    if not root
+        or not target
+        or not target.Root then
+
+        return
+    end
+
+    if STATE.MovementOwner then
+        return
+    end
+
+    local p = target.Root.Position
+
+    local farmPos =
+        Vector3.new(
+            p.X,
+            p.Y + CONFIG.FarmHeight,
+            p.Z
+        )
+
+    local look =
+        Vector3.new(
+            p.X,
+            farmPos.Y,
+            p.Z
+        )
+
+    pcall(function()
+        humanoid.AutoRotate = false
+        humanoid.Sit = false
+
+        root.AssemblyLinearVelocity =
+            Vector3.zero
+
+        root.AssemblyAngularVelocity =
+            Vector3.zero
+
+        root.CFrame =
+            CFrame.lookAt(
+                farmPos,
+                look
+            )
+    end)
+end
+
+--=========================================================
+-- QUEST FLOW
+--=========================================================
+
+local function abandonQuest()
+    invoke("AbandonQuest")
+end
+
+local function startQuest(q)
+    if not q then
+        return false
+    end
+
+    local _, _, root = getCharacter()
+
+    if not root then
+        return false
+    end
+
+    if os.clock() - STATE.LastQuest < 1.0 then
+        return false
+    end
+
+    STATE.LastQuest = os.clock()
+
+    specialEntrance(q)
+
+    setStage(
+        "QUEST",
+        "Đi nhận " .. q.Mob
+    )
+
+    travelTo(
+        "QUEST",
+        q.CFrame * CFrame.new(0, 3, 0)
+    )
+
+    task.wait(0.15)
+
+    local ok =
+        invoke(
+            "StartQuest",
+            q.Quest,
+            q.Index
+        )
+
+    return ok
+end
+
+local function getMobArea(q)
+    if not q then
+        return nil
+    end
+
+    local static =
+        MOB_SPAWNS[q.Mob]
+
+    if static then
+        return static
+    end
+
+    for _, obj in ipairs(
+        ReplicatedStorage:GetChildren()
+    ) do
+        if enemyMatches(obj, q.Mob) then
+            local root =
+                obj:FindFirstChild(
+                    "HumanoidRootPart"
+                )
+
+            if root then
+                return root.CFrame
+            end
+        end
+    end
+
+    return nil
+end
+
+--=========================================================
+-- STATS
+--=========================================================
+
+local function addStat(stat, amount)
+    return invoke(
+        "AddPoint",
+        stat,
+        amount
+    )
+end
+
+local function autoStats()
+    if not CONFIG.AutoStats then
+        return
+    end
+
+    local points = getPoints()
+
+    if points <= 0 then
+        return
+    end
+
+    local data = Player:FindFirstChild("Data")
+
+    if not data then
+        return
+    end
+
+    for _, stat in ipairs(CONFIG.StatOrder) do
+        local value = data:FindFirstChild(stat)
+
+        if value and value.Value < CONFIG.MaxLevel then
+            local amount =
+                math.min(
+                    CONFIG.StatBatch,
+                    points,
+                    CONFIG.MaxLevel - value.Value
+                )
+
+            if amount > 0 then
+                addStat(stat, amount)
+                return
+            end
+        end
+    end
+end
+
+task.spawn(function()
+    while ScreenGui.Parent do
+        if STATE.Enabled then
+            safe("Stats", autoStats)
+        end
+
+        task.wait(0.25)
+    end
+end)
+
+--=========================================================
+-- REDEEM CODES
+--=========================================================
+
+local CODES = {
+    "EASTEREXP",
+    "LIGHTNINGABUSE",
+    "1LOSTADMIN ",
+    "SUB2CAPTAINMAUI",
+    "Enyu_is_Pro",
+    "Starcodeheo",
+    "Sub2Fer999",
+    "Magicbus",
+    "JCWK",
+    "kittgaming",
+    "Bluxxy",
+    "fudd10_v2",
+    "SUB2GAMERROBOT_EXP1",
+    "Axiore",
+    "Sub2Daigrock",
+    "Bignews",
+    "Sub2NoobMaster123",
+    "StrawHatMaine",
+    "TantaiGaming",
+    "TheGreatAce",
+    "Fudd10",
+    "Sub2OfficialNoobie",
+    "CHANDLER",
+}
+
+local function redeemAll()
+    if not CONFIG.AutoRedeem
+        or STATE.Redeemed then
+
+        return
+    end
+
+    local remotes =
+        ReplicatedStorage:FindFirstChild("Remotes")
+
+    local redeem =
+        remotes and remotes:FindFirstChild("Redeem")
+
+    if not redeem then
+        return
+    end
+
+    STATE.Redeemed = true
+
+    local remaining =
+        CONFIG.StartupGrace
+        - (os.clock() - STATE.BootAt)
+
+    if remaining > 0 then
+        task.wait(remaining)
+    end
+
+    for _, code in ipairs(CODES) do
+        if not ScreenGui.Parent then
+            return
+        end
+
+        safe("Redeem", function()
+            redeem:InvokeServer(code)
+        end)
+
+        task.wait(2.0)
+    end
+end
+
+task.spawn(function()
+    safe("RedeemAll", redeemAll)
+end)
+
+--=========================================================
+-- ABILITIES + HAKI
+--=========================================================
+
+local function ensureBuso()
+    local character = Player.Character
+
+    if character
+        and not character:FindFirstChild("HasBuso") then
+
+        invoke("Buso")
+    end
+end
+
+local ABILITY_CALLS = {
+    {"BuyHaki", "Buso"},
+    {"BuyHaki", "Geppo"},
+    {"BuyHaki", "Soru"},
+    {"KenTalk", "Buy"},
+}
+
+local function buyAbilities()
+    if not CONFIG.AutoAbilities then
+        return
+    end
+
+    if os.clock() - STATE.BootAt < CONFIG.StartupGrace then
+        return
+    end
+
+    if os.clock() - STATE.LastAbilityBuy < 45 then
+        return
+    end
+
+    STATE.LastAbilityBuy = os.clock()
+
+    local call = ABILITY_CALLS[STATE.AbilityIndex]
+
+    STATE.AbilityIndex =
+        (STATE.AbilityIndex % #ABILITY_CALLS) + 1
+
+    invoke(table.unpack(call))
+end
+
+task.spawn(function()
+    while ScreenGui.Parent do
+        if STATE.Enabled then
+            safe("Buso", ensureBuso)
+            safe("Abilities", buyAbilities)
+        end
+
+        task.wait(3)
+    end
+end)
+
+--=========================================================
+-- FIGHTING STYLES - BEST EFFORT
+-- Server tự kiểm tra tiền/mastery/items.
+--=========================================================
+
+local STYLE_CALLS = {
+    {"BuyBlackLeg"},
+    {"BuyElectro"},
+    {"BuyFishmanKarate"},
+    {"BlackbeardReward", "DragonClaw", "1"},
+    {"BlackbeardReward", "DragonClaw", "2"},
+    {"BuySuperhuman"},
+    {"BuyDeathStep"},
+    {"BuySharkmanKarate"},
+    {"BuyElectricClaw"},
+    {"BuyDragonTalon"},
+    {"BuyGodhuman"},
+    {"BuySanguineArt"},
+}
+
+local function autoStyles()
+    if not CONFIG.AutoFightingStyles then
+        return
+    end
+
+    if os.clock() - STATE.BootAt < CONFIG.StartupGrace then
+        return
+    end
+
+    if os.clock() - STATE.LastStyleBuy < 60 then
+        return
+    end
+
+    STATE.LastStyleBuy = os.clock()
+
+    local call = STYLE_CALLS[STATE.StyleIndex]
+
+    STATE.StyleIndex =
+        (STATE.StyleIndex % #STYLE_CALLS) + 1
+
+    invoke(table.unpack(call))
+end
+
+task.spawn(function()
+    while ScreenGui.Parent do
+        if STATE.Enabled then
+            safe("Styles", autoStyles)
+        end
+
+        task.wait(5)
+    end
+end)
+
+--=========================================================
+-- FRUIT SYSTEM
+--=========================================================
+
+local FruitCache =
+    setmetatable({}, {__mode = "k"})
+
+local function isFruitTool(tool)
+    if not tool or not tool:IsA("Tool") then
+        return false
+    end
+
+    return tool:FindFirstChild("Fruit") ~= nil
+        or string.find(
+            string.lower(tool.Name),
+            "fruit",
+            1,
+            true
+        ) ~= nil
+end
+
+local function trackFruit(obj)
+    if obj:IsA("Tool")
+        and not obj:IsDescendantOf(Player)
+        and isFruitTool(obj) then
+
+        FruitCache[obj] = true
+    end
+end
+
+Workspace.DescendantAdded:Connect(function(obj)
+    if obj:IsA("Tool") then
+        task.defer(function()
+            trackFruit(obj)
+        end)
+    end
+end)
+
+task.spawn(function()
+    for index, obj in ipairs(
+        Workspace:GetDescendants()
+    ) do
+        trackFruit(obj)
+
+        if index % 600 == 0 then
+            task.wait()
+        end
+    end
+end)
+
+local function randomFruit()
+    if not CONFIG.AutoRandomFruit then
+        return
+    end
+
+    if os.clock() - STATE.BootAt < CONFIG.StartupGrace then
+        return
+    end
+
+    if os.clock() - STATE.LastRandomFruit
+        < CONFIG.RandomFruitDelay then
+
+        return
+    end
+
+    STATE.LastRandomFruit = os.clock()
+
+    invoke("Cousin", "Buy")
+end
+
+local function getFruitCatalog()
+    local ok, result =
+        invoke("GetFruits")
+
+    if ok and type(result) == "table" then
+        return result
+    end
+
+    return nil
+end
+
+local function normalizeFruitName(name)
+    local s =
+        string.lower(
+            tostring(name or "")
+        )
+
+    s = s:gsub("%s+[Ff][Rr][Uu][Ii][Tt]$", "")
+    s = s:gsub("[^%w]", "")
+
+    return s
+end
+
+local function resolveFruitInternal(tool)
+    local catalog = getFruitCatalog()
+
+    if type(catalog) ~= "table" then
+        return nil
+    end
+
+    local token =
+        normalizeFruitName(tool.Name)
+
+    for _, fruit in pairs(catalog) do
+        local name =
+            type(fruit) == "table"
+            and fruit.Name
+            or fruit
+
+        if name
+            and normalizeFruitName(name) == token then
+
+            return name
+        end
+    end
+
+    for _, fruit in pairs(catalog) do
+        local name =
+            type(fruit) == "table"
+            and fruit.Name
+            or fruit
+
+        if name then
+            local f =
+                normalizeFruitName(name)
+
+            if string.find(f, token, 1, true)
+                or string.find(token, f, 1, true) then
+
+                return name
+            end
+        end
+    end
+
+    return nil
+end
+
+local function storeOwnedFruits()
+    if not CONFIG.AutoStoreFruit then
+        return
+    end
+
+    local containers = {
+        Player:FindFirstChild("Backpack"),
+        Player.Character,
+    }
+
+    for _, container in ipairs(containers) do
+        if container then
+            for _, tool in ipairs(container:GetChildren()) do
+                if isFruitTool(tool) then
+                    local internal =
+                        resolveFruitInternal(tool)
+
+                    if internal then
+                        invoke(
+                            "StoreFruit",
+                            internal,
+                            tool
+                        )
+
+                        task.wait(0.15)
+                    end
+                end
+            end
+        end
+    end
+end
+
+local function nearestWorldFruit()
+    local _, _, root = getCharacter()
+
+    if not root then
+        return nil
+    end
+
+    local nearest = nil
+    local nearestHandle = nil
+    local nearestDistance = math.huge
+
+    for tool in pairs(FruitCache) do
+        if not tool
+            or not tool.Parent
+            or tool:IsDescendantOf(Player) then
+
+            FruitCache[tool] = nil
+        else
+            local handle =
+                tool:FindFirstChild("Handle")
+                or tool:FindFirstChildWhichIsA(
+                    "BasePart",
+                    true
+                )
+
+            if handle then
+                local d =
+                    (handle.Position - root.Position).Magnitude
+
+                if d < nearestDistance then
+                    nearest = tool
+                    nearestHandle = handle
+                    nearestDistance = d
+                end
+            end
+        end
+    end
+
+    return nearest, nearestHandle
+end
+
+local function pickupFruit()
+    if not CONFIG.AutoPickupFruit
+        or STATE.MovementOwner then
+
+        return
+    end
+
+    local tool, handle =
+        nearestWorldFruit()
+
+    if not tool or not handle then
+        return
+    end
+
+    local _, _, root =
+        getCharacter()
+
+    if not root then
+        return
+    end
+
+    local old = root.CFrame
+
+    if not setMovementOwner("FRUIT") then
+        return
+    end
+
+    safe("FruitPickup", function()
+        if type(firetouchinterest) == "function" then
+            firetouchinterest(root, handle, 0)
+            task.wait(0.05)
+            firetouchinterest(root, handle, 1)
+        end
+
+        if tool.Parent
+            and not tool:IsDescendantOf(Player) then
+
+            root.CFrame =
+                handle.CFrame
+                * CFrame.new(0, 1.5, 0)
+
+            task.wait(0.25)
+        end
+
+        root.CFrame = old
+    end)
+
+    releaseMovement("FRUIT")
+end
+
+task.spawn(function()
+    while ScreenGui.Parent do
+        if STATE.Enabled then
+            safe("RandomFruit", randomFruit)
+            safe("StoreFruit", storeOwnedFruits)
+            safe("PickupFruit", pickupFruit)
+        end
+
+        task.wait(1)
+    end
+end)
+
+--=========================================================
+-- SEA TRANSITIONS
+--=========================================================
+
+local function findBoss(namePart)
+    local folders = {
+        Workspace:FindFirstChild("Enemies"),
+        ReplicatedStorage,
+    }
+
+    for _, folder in ipairs(folders) do
+        if folder then
+            for _, obj in ipairs(folder:GetChildren()) do
+                if obj:IsA("Model")
+                    and string.find(
+                        string.lower(obj.Name),
+                        string.lower(namePart),
+                        1,
+                        true
+                    ) then
+
+                    local hum =
+                        obj:FindFirstChildOfClass("Humanoid")
+
+                    local root =
+                        obj:FindFirstChild("HumanoidRootPart")
+
+                    if hum and root and hum.Health > 0 then
+                        return obj
+                    end
+                end
+            end
+        end
+    end
+
+    return nil
+end
+
+local function farmBossModel(boss, stage)
+    if not boss or not boss.Parent then
+        return false
+    end
+
+    local hum =
+        boss:FindFirstChildOfClass("Humanoid")
+
+    local root =
+        boss:FindFirstChild("HumanoidRootPart")
+
+    if not hum or not root then
+        return false
+    end
+
+    setStage(stage, boss.Name)
+
+    while STATE.Enabled
+        and boss.Parent
+        and hum.Health > 0 do
+
+        local character, _, playerRoot =
+            getCharacter()
+
+        if not playerRoot then
+            task.wait(0.2)
+            continue
+        end
+
+        if (
+            playerRoot.Position
+            - root.Position
+        ).Magnitude > 150 then
+
+            travelTo(
+                "BOSS",
+                root.CFrame
+                * CFrame.new(
+                    0,
+                    CONFIG.FarmHeight,
+                    0
+                )
+            )
+        else
+            hoverTarget({
+                Root = root,
+            })
+
+            local tool = equipBestTool()
+
+            local attacked, backend =
+                attack(
+                    tool,
+                    {
+                        {
+                            Enemy = boss,
+                            Humanoid = hum,
+                            Root = root,
+                        },
+                    },
+                    playerRoot
+                )
+
+            if attacked then
+                STATE.Detail =
+                    boss.Name ..
+                    " | ATK=" ..
+                    tostring(backend)
+            end
+        end
+
+        task.wait(0.08)
+    end
+
+    return true
+end
+
+local function unlockSea2()
+    if getSea() ~= 1
+        or getLevel() < 700 then
+
+        return false
+    end
+
+    setStage(
+        "SEA 2",
+        "Military Detective / Ice Admiral"
+    )
+
+    invoke(
+        "DressrosaQuestProgress",
+        "Detective"
+    )
+
+    task.wait(0.3)
+
+    local backpack =
+        Player:FindFirstChild("Backpack")
+
+    local key =
+        backpack and backpack:FindFirstChild("Key")
+
+    local character, humanoid, root =
+        getCharacter()
+
+    if key and humanoid then
+        humanoid:EquipTool(key)
+    end
+
+    if root then
+        travelTo(
+            "SEA2_DOOR",
+            CFrame.new(
+                1348.49,
+                37.35,
+                -1326.12
+            )
+        )
+    end
+
+    task.wait(0.5)
+
+    local boss =
+        findBoss("Ice Admiral")
+
+    if boss then
+        farmBossModel(
+            boss,
+            "SEA 2 • Ice Admiral"
+        )
+    end
+
+    invoke("TravelDressrosa")
+
+    return true
+end
+
+local function unlockSea3()
+    if getSea() ~= 2
+        or getLevel() < 1500 then
+
+        return false
+    end
+
+    setStage(
+        "SEA 3",
+        "Kiểm tra TravelZou"
+    )
+
+    -- Nếu account đã unlock, call này chuyển sea luôn.
+    invoke("TravelZou")
+    task.wait(1.0)
+
+    if getSea() == 3 then
+        return true
+    end
+
+    -- Best-effort story progress.
+    invoke(
+        "TalkTrevor",
+        "1"
+    )
+    task.wait(0.10)
+
+    invoke(
+        "TalkTrevor",
+        "2"
+    )
+    task.wait(0.10)
+
+    invoke(
+        "TalkTrevor",
+        "3"
+    )
+
+    local okBartilo, progress =
+        invoke(
+            "BartiloQuestProgress",
+            "Bartilo"
+        )
+
+    if okBartilo
+        and tonumber(progress) == 0 then
+
+        invoke(
+            "StartQuest",
+            "BartiloQuest",
+            1
+        )
+    end
+
+    -- Z quest / rip_indra progression.
+    local okZ, z =
+        invoke(
+            "ZQuestProgress",
+            "Check"
+        )
+
+    if okZ and tonumber(z) == 0 then
+        invoke(
+            "ZQuestProgress",
+            "Begin"
+        )
+    end
+
+    local indra =
+        findBoss("rip_indra")
+
+    if indra then
+        farmBossModel(
+            indra,
+            "SEA 3 • rip_indra"
+        )
+    end
+
+    invoke("TravelZou")
+
+    return true
+end
+
+local function autoSea()
+    if not CONFIG.AutoSea then
+        return false
+    end
+
+    local sea = getSea()
+    local level = getLevel()
+
+    if sea == 1 and level >= 700 then
+        unlockSea2()
+        return true
+    end
+
+    if sea == 2 and level >= 1500 then
+        unlockSea3()
+        return true
+    end
+
+    return false
+end
+
+--=========================================================
+-- NORMAL LEVEL FARM
+--=========================================================
+
+local function farmLevel()
+    local level = getLevel()
+
+    if level >= CONFIG.MaxLevel then
+        setStage(
+            "MAX LEVEL",
+            "Lv." .. tostring(level) ..
+            " • tiếp tục Fruit/Style/Haki"
+        )
+
+        return
+    end
+
+    local q =
+        resolveQuest(level)
+
+    if not q then
+        setStage(
+            "QUEST ERROR",
+            "Không có quest cho Lv." ..
+            tostring(level)
+        )
+
+        task.wait(1)
+        return
+    end
+
+    if questVisible()
+        and not questMatches(q) then
+
+        setStage(
+            "QUEST",
+            "Bỏ quest cũ"
+        )
+
+        abandonQuest()
+        task.wait(0.25)
+        return
+    end
+
+    if not questVisible() then
+        startQuest(q)
+        task.wait(0.25)
+        return
+    end
+
+    local character, _, root =
+        getCharacter()
+
+    if not root then
+        return
+    end
+
+    local targets =
+        getTargets(
+            q.Mob,
+            root.Position
+        )
+
+    if #targets == 0 then
+        local area =
+            getMobArea(q)
+
+        if area then
+            setStage(
+                "TRAVEL",
+                "Đi bãi " .. q.Mob
+            )
+
+            specialEntrance(q)
+
+            travelTo(
+                "MOB",
+                area
+                * CFrame.new(
+                    0,
+                    CONFIG.FarmHeight,
+                    0
+                )
+            )
+        else
+            setStage(
+                "WAIT MOB",
+                q.Mob
+            )
+        end
+
+        task.wait(0.15)
+        return
+    end
+
+    local target = targets[1]
+
+    setStage(
+        "FARM",
+        q.Mob ..
+        " | x" ..
+        tostring(#targets)
+    )
+
+    local distance =
+        (
+            target.Root.Position
+            - root.Position
+        ).Magnitude
+
+    if distance > 150 then
+        travelTo(
+            "TARGET",
+            target.Root.CFrame
+            * CFrame.new(
+                0,
+                CONFIG.FarmHeight,
+                0
+            )
+        )
+
+        return
+    end
+
+    hoverTarget(target)
+
+    local tool =
+        equipBestTool()
+
+    local attacked, backend =
+        attack(
+            tool,
+            targets,
+            root
+        )
+
+    if attacked then
+        STATE.Detail =
+            q.Mob ..
+            " | x" ..
+            tostring(#targets) ..
+            " | ATK=" ..
+            tostring(backend)
+    else
+        STATE.Detail =
+            q.Mob ..
+            " | ATK WAIT=" ..
+            tostring(backend)
+    end
+end
+
+--=========================================================
+-- MAIN KAITUN LOOP
+--=========================================================
+
+print("[AXIOM KAITUN] CORE READY")
+
+task.spawn(function()
+    while ScreenGui.Parent do
+        if not STATE.Enabled then
+            setStage(
+                "PAUSED",
+                "Kaitun OFF"
+            )
+
+            task.wait(0.3)
+            continue
+        end
+
+        local character =
+            getCharacter()
+
+        if not character then
+            setStage(
+                "RESPAWN",
+                "Chờ nhân vật"
+            )
+
+            task.wait(0.5)
+            continue
+        end
+
+        local seaHandled = false
+
+        safe("AutoSea", function()
+            seaHandled = autoSea()
+        end)
+
+        if not seaHandled then
+            safe("FarmLevel", farmLevel)
+        end
+
+        task.wait(0.06)
+    end
+end)
+
+print("[AXIOM KAITUN] A-Z V0.3 SECURITY KICK FIX LOADED")
