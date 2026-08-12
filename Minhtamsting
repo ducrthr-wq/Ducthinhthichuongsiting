@@ -1,492 +1,605 @@
---[[
-    ============================================================
-        AXIOM - ROBLOX AFK / LOW-END PERFORMANCE OPTIMIZER
-    ============================================================
-
-    Mục tiêu:
-    - Giảm GPU
-    - Giảm CPU
-    - Giảm hiệu ứng hình ảnh
-    - Giảm tải rendering
-    - Không xóa UI
-    - Không xóa nhân vật LocalPlayer
-    - Không chạy vòng lặp quét toàn map mỗi frame
-    - Hạn chế làm hỏng auto farm
-
-    Lưu ý:
-    Một số executor không hỗ trợ setfpscap().
---]]
-
--- ============================================================
--- SERVICES
--- ============================================================
+--==============================================================
+-- AXIOM GAG2 - AUTO SELL V2
+-- Steven -> Open Menu -> Sell Inventory
+--==============================================================
 
 local Players = game:GetService("Players")
-local Lighting = game:GetService("Lighting")
 local Workspace = game:GetService("Workspace")
-local RunService = game:GetService("RunService")
-local SoundService = game:GetService("SoundService")
-local StarterGui = game:GetService("StarterGui")
+local VirtualInputManager = game:GetService("VirtualInputManager")
 
-local LocalPlayer = Players.LocalPlayer
+local Player = Players.LocalPlayer
 
--- ============================================================
--- CONFIG
--- ============================================================
+local SELL_DEBUG = true
 
-local CONFIG = {
-
-    -- FPS thấp hơn = giảm CPU/GPU mạnh hơn
-    FPS_CAP = 12,
-
-    -- Tắt texture
-    DISABLE_TEXTURES = true,
-
-    -- Tắt particle / trail / beam
-    DISABLE_EFFECTS = true,
-
-    -- Tắt shadow
-    DISABLE_SHADOWS = true,
-
-    -- Tắt âm thanh
-    MUTE_SOUND = true,
-
-    -- Làm Part đơn giản hơn
-    SIMPLIFY_PARTS = true,
-
-    -- Ẩn vật thể ở xa
-    HIDE_DISTANT_OBJECTS = true,
-
-    -- Khoảng cách render giả lập
-    MAX_RENDER_DISTANCE = 250,
-
-    -- Thời gian cập nhật kiểm tra vật thể ở xa
-    DISTANCE_UPDATE_DELAY = 3,
-
-    -- Số object xử lý mỗi batch
-    BATCH_SIZE = 300,
-
-    -- Thời gian nghỉ giữa batch
-    BATCH_DELAY = 0.03,
-
-    -- Không đụng vào nhân vật
-    KEEP_CHARACTERS = true,
-
-    -- Không đụng UI
-    KEEP_UI = true,
-}
-
--- ============================================================
--- FPS CAP
--- ============================================================
-
-pcall(function()
-    if setfpscap then
-        setfpscap(CONFIG.FPS_CAP)
+local function SellLog(...)
+    if SELL_DEBUG then
+        print("[AXIOM SELL]", ...)
     end
-end)
+end
 
--- ============================================================
--- GRAPHICS QUALITY
--- ============================================================
+--==============================================================
+-- CHARACTER
+--==============================================================
 
-pcall(function()
-    settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
-end)
+local function GetCharacter()
+    return Player.Character or Player.CharacterAdded:Wait()
+end
 
--- ============================================================
--- LIGHTING
--- ============================================================
+local function GetRoot()
+    local char = GetCharacter()
 
-local function optimizeLighting()
+    return char:FindFirstChild("HumanoidRootPart")
+        or char:WaitForChild("HumanoidRootPart", 5)
+end
 
-    pcall(function()
-        Lighting.GlobalShadows = false
-        Lighting.Brightness = 1
-        Lighting.EnvironmentDiffuseScale = 0
-        Lighting.EnvironmentSpecularScale = 0
-        Lighting.FogStart = 0
-        Lighting.FogEnd = 100000
-    end)
+--==============================================================
+-- TEXT NORMALIZER
+--==============================================================
 
-    for _, object in ipairs(Lighting:GetChildren()) do
+local function Normalize(str)
+    str = tostring(str or "")
+    str = string.lower(str)
 
-        if object:IsA("BloomEffect")
-        or object:IsA("BlurEffect")
-        or object:IsA("ColorCorrectionEffect")
-        or object:IsA("DepthOfFieldEffect")
-        or object:IsA("SunRaysEffect") then
+    str = str:gsub("[%p%c]", " ")
+    str = str:gsub("%s+", " ")
 
-            pcall(function()
-                object.Enabled = false
-            end)
+    return str
+end
 
-        elseif object:IsA("Atmosphere") then
+local function Contains(str, text)
+    return string.find(
+        Normalize(str),
+        Normalize(text),
+        1,
+        true
+    ) ~= nil
+end
 
-            pcall(function()
-                object.Density = 0
-                object.Haze = 0
-                object.Glare = 0
-            end)
+--==============================================================
+-- OBJECT DESCRIPTION
+--==============================================================
 
+local function GetDescription(obj)
+
+    local text = obj.Name
+
+    if obj:IsA("ProximityPrompt") then
+        text = text
+            .. " "
+            .. tostring(obj.ActionText)
+            .. " "
+            .. tostring(obj.ObjectText)
+    end
+
+    local parent = obj.Parent
+
+    local depth = 0
+
+    while parent and depth < 5 do
+        text = text .. " " .. parent.Name
+
+        parent = parent.Parent
+        depth += 1
+    end
+
+    return text
+end
+
+--==============================================================
+-- FIND STEVEN / SELL STAND
+--==============================================================
+
+local function FindStevenPrompt()
+
+    local bestPrompt = nil
+
+    for _, obj in ipairs(Workspace:GetDescendants()) do
+
+        if obj:IsA("ProximityPrompt") then
+
+            local info = GetDescription(obj)
+
+            -- Ưu tiên prompt của Steven
+            if Contains(info, "steven") then
+
+                SellLog(
+                    "Found Steven:",
+                    obj:GetFullName()
+                )
+
+                return obj
+            end
+
+            -- Fallback Sell Stand
+            if Contains(info, "sell stand")
+                or Contains(info, "sellstand")
+                or Contains(info, "sell stuff") then
+
+                bestPrompt = obj
+            end
         end
     end
+
+    if bestPrompt then
+        SellLog(
+            "Found Sell Stand:",
+            bestPrompt:GetFullName()
+        )
+    end
+
+    return bestPrompt
 end
 
-optimizeLighting()
+--==============================================================
+-- GET PROMPT POSITION
+--==============================================================
 
--- ============================================================
--- SOUND
--- ============================================================
+local function GetPosition(obj)
 
-if CONFIG.MUTE_SOUND then
+    if not obj then
+        return nil
+    end
 
-    pcall(function()
-        SoundService.Volume = 0
+    local parent = obj.Parent
+
+    if parent:IsA("BasePart") then
+        return parent.Position
+    end
+
+    local model = obj:FindFirstAncestorOfClass("Model")
+
+    if model then
+
+        local part =
+            model.PrimaryPart
+            or model:FindFirstChild("HumanoidRootPart")
+            or model:FindFirstChildWhichIsA("BasePart")
+
+        if part then
+            return part.Position
+        end
+    end
+
+    return nil
+end
+
+--==============================================================
+-- FIRE PROMPT
+--==============================================================
+
+local function TriggerPrompt(prompt)
+
+    if not prompt then
+        return false
+    end
+
+    prompt.HoldDuration = 0
+
+    -- Executor support
+    if fireproximityprompt then
+
+        local success = pcall(function()
+            fireproximityprompt(prompt)
+        end)
+
+        if success then
+            return true
+        end
+    end
+
+    -- Fallback
+    local success = pcall(function()
+
+        prompt:InputHoldBegin()
+
+        task.wait(0.05)
+
+        prompt:InputHoldEnd()
+
     end)
 
+    return success
 end
 
--- ============================================================
--- CHECK SAFE OBJECT
--- ============================================================
+--==============================================================
+-- CHECK SELL INVENTORY BUTTON
+--==============================================================
 
-local function isCharacterObject(object)
+local function IsSellInventoryButton(obj)
 
-    if not CONFIG.KEEP_CHARACTERS then
+    if not (
+        obj:IsA("TextButton")
+        or obj:IsA("ImageButton")
+    ) then
         return false
     end
 
-    local model = object:FindFirstAncestorOfClass("Model")
+    local text = obj.Name
 
-    if not model then
-        return false
+    if obj:IsA("TextButton") then
+        text = text .. " " .. obj.Text
     end
 
-    if Players:GetPlayerFromCharacter(model) then
+    -- xem cả TextLabel nằm trong button
+    for _, child in ipairs(obj:GetDescendants()) do
+
+        if child:IsA("TextLabel")
+            or child:IsA("TextButton") then
+
+            text = text
+                .. " "
+                .. tostring(child.Text)
+        end
+    end
+
+    text = Normalize(text)
+
+    -- chính xác nhất
+    if Contains(text, "sell inventory") then
+        return true
+    end
+
+    -- các wording khác
+    if Contains(text, "sell all") then
+        return true
+    end
+
+    if Contains(text, "sell everything") then
+        return true
+    end
+
+    if Contains(text, "sell crops") then
         return true
     end
 
     return false
 end
 
--- ============================================================
--- OPTIMIZE OBJECT
--- ============================================================
+--==============================================================
+-- FIND SELL INVENTORY BUTTON
+--==============================================================
 
-local function optimizeObject(object)
+local function FindSellInventoryButton()
 
-    if not object then
-        return
-    end
+    local gui = Player:FindFirstChild("PlayerGui")
 
-    ------------------------------------------------------------
-    -- PARTICLES
-    ------------------------------------------------------------
-
-    if CONFIG.DISABLE_EFFECTS then
-
-        if object:IsA("ParticleEmitter")
-        or object:IsA("Trail")
-        or object:IsA("Beam")
-        or object:IsA("Smoke")
-        or object:IsA("Fire")
-        or object:IsA("Sparkles") then
-
-            pcall(function()
-                object.Enabled = false
-            end)
-
-            return
-        end
-
-    end
-
-    ------------------------------------------------------------
-    -- LIGHT SOURCES
-    ------------------------------------------------------------
-
-    if object:IsA("PointLight")
-    or object:IsA("SpotLight")
-    or object:IsA("SurfaceLight") then
-
-        pcall(function()
-            object.Enabled = false
-        end)
-
-        return
-    end
-
-    ------------------------------------------------------------
-    -- TEXTURES
-    ------------------------------------------------------------
-
-    if CONFIG.DISABLE_TEXTURES then
-
-        if object:IsA("Texture")
-        or object:IsA("Decal") then
-
-            pcall(function()
-                object.Transparency = 1
-            end)
-
-            return
-        end
-
-    end
-
-    ------------------------------------------------------------
-    -- PARTS
-    ------------------------------------------------------------
-
-    if object:IsA("BasePart") then
-
-        if isCharacterObject(object) then
-            return
-        end
-
-        pcall(function()
-
-            if CONFIG.DISABLE_SHADOWS then
-                object.CastShadow = false
-            end
-
-            if CONFIG.SIMPLIFY_PARTS then
-
-                object.Material = Enum.Material.SmoothPlastic
-
-                object.Reflectance = 0
-
-            end
-        end)
-
-        return
-    end
-
-    ------------------------------------------------------------
-    -- MESH
-    ------------------------------------------------------------
-
-    if object:IsA("SpecialMesh") then
-
-        pcall(function()
-            object.TextureId = ""
-        end)
-
-    end
-
-end
-
--- ============================================================
--- INITIAL WORKSPACE OPTIMIZATION
--- ============================================================
-
-local function optimizeWorkspace()
-
-    local descendants = Workspace:GetDescendants()
-
-    local processed = 0
-
-    for i = 1, #descendants do
-
-        optimizeObject(descendants[i])
-
-        processed += 1
-
-        if processed >= CONFIG.BATCH_SIZE then
-
-            processed = 0
-
-            task.wait(CONFIG.BATCH_DELAY)
-
-        end
-
-    end
-
-end
-
-task.spawn(optimizeWorkspace)
-
--- ============================================================
--- OPTIMIZE NEW OBJECTS
--- ============================================================
-
-Workspace.DescendantAdded:Connect(function(object)
-
-    task.defer(function()
-
-        optimizeObject(object)
-
-    end)
-
-end)
-
-Lighting.ChildAdded:Connect(function()
-
-    task.defer(optimizeLighting)
-
-end)
-
--- ============================================================
--- DISTANCE CULLING
--- ============================================================
-
-local HiddenObjects = {}
-
-local function getRootPart()
-
-    local character = LocalPlayer.Character
-
-    if not character then
+    if not gui then
         return nil
     end
 
-    return character:FindFirstChild("HumanoidRootPart")
+    for _, obj in ipairs(gui:GetDescendants()) do
 
+        if IsSellInventoryButton(obj) then
+
+            SellLog(
+                "Sell Inventory button:",
+                obj:GetFullName()
+            )
+
+            return obj
+        end
+    end
+
+    return nil
 end
 
-local function distanceCull()
+--==============================================================
+-- PRESS GUI BUTTON
+--==============================================================
 
-    if not CONFIG.HIDE_DISTANT_OBJECTS then
-        return
+local function PressButton(button)
+
+    if not button then
+        return false
     end
 
-    while task.wait(CONFIG.DISTANCE_UPDATE_DELAY) do
+    -- Method 1
+    if firesignal then
 
-        local root = getRootPart()
+        local success = pcall(function()
+            firesignal(button.Activated)
+        end)
 
-        if not root then
-            continue
+        if success then
+            SellLog("Clicked with firesignal")
+            return true
         end
-
-        local rootPosition = root.Position
-
-        local objects = Workspace:GetDescendants()
-
-        local handled = 0
-
-        for _, object in ipairs(objects) do
-
-            if object:IsA("BasePart")
-            and not isCharacterObject(object)
-            and not object:IsDescendantOf(LocalPlayer.Character or Workspace) then
-
-                local distance = (object.Position - rootPosition).Magnitude
-
-                if distance > CONFIG.MAX_RENDER_DISTANCE then
-
-                    if HiddenObjects[object] == nil then
-
-                        HiddenObjects[object] = object.LocalTransparencyModifier
-
-                    end
-
-                    object.LocalTransparencyModifier = 1
-
-                else
-
-                    if HiddenObjects[object] ~= nil then
-
-                        object.LocalTransparencyModifier =
-                            HiddenObjects[object]
-
-                        HiddenObjects[object] = nil
-
-                    end
-
-                end
-
-            end
-
-            handled += 1
-
-            if handled >= CONFIG.BATCH_SIZE then
-
-                handled = 0
-
-                task.wait()
-
-            end
-
-        end
-
     end
 
-end
+    -- Method 2
+    local success = pcall(function()
+        button:Activate()
+    end)
 
-task.spawn(distanceCull)
-
--- ============================================================
--- TERRAIN OPTIMIZATION
--- ============================================================
-
-pcall(function()
-
-    local Terrain = Workspace:FindFirstChildOfClass("Terrain")
-
-    if Terrain then
-
-        Terrain.WaterWaveSize = 0
-        Terrain.WaterWaveSpeed = 0
-        Terrain.WaterReflectance = 0
-        Terrain.WaterTransparency = 1
-
-        Terrain.Decoration = false
-
+    if success then
+        SellLog("Clicked with Activate")
+        return true
     end
 
-end)
+    -- Method 3 - real screen click
+    local pos = button.AbsolutePosition
+    local size = button.AbsoluteSize
 
--- ============================================================
--- REMOVE POST PROCESSING ADDED LATER
--- ============================================================
+    if size.X > 0 and size.Y > 0 then
 
-task.spawn(function()
+        local x = pos.X + size.X / 2
+        local y = pos.Y + size.Y / 2
 
-    while task.wait(10) do
+        success = pcall(function()
 
-        optimizeLighting()
+            VirtualInputManager:SendMouseButtonEvent(
+                x,
+                y,
+                0,
+                true,
+                game,
+                0
+            )
 
-    end
+            task.wait(0.05)
 
-end)
-
--- ============================================================
--- PERIODIC GARBAGE COLLECTION
--- ============================================================
-
-task.spawn(function()
-
-    while task.wait(30) do
-
-        pcall(function()
-
-            if collectgarbage then
-                collectgarbage("collect")
-            end
+            VirtualInputManager:SendMouseButtonEvent(
+                x,
+                y,
+                0,
+                false,
+                game,
+                0
+            )
 
         end)
 
+        if success then
+            SellLog("Clicked using screen position")
+            return true
+        end
+    end
+
+    return false
+end
+
+--==============================================================
+-- WAIT FOR SELL MENU
+--==============================================================
+
+local function WaitForSellButton(timeout)
+
+    timeout = timeout or 4
+
+    local start = tick()
+
+    repeat
+
+        local button = FindSellInventoryButton()
+
+        if button then
+            return button
+        end
+
+        task.wait(0.1)
+
+    until tick() - start >= timeout
+
+    return nil
+end
+
+--==============================================================
+-- SELL EVERYTHING
+--==============================================================
+
+local Selling = false
+
+local function SellAll()
+
+    if Selling then
+        return false
+    end
+
+    Selling = true
+
+    SellLog("Starting sell...")
+
+    local root = GetRoot()
+
+    if not root then
+
+        Selling = false
+
+        SellLog("HumanoidRootPart missing")
+
+        return false
+    end
+
+    --==========================================================
+    -- CASE 1:
+    -- Menu sell đang mở sẵn
+    --==========================================================
+
+    local existingButton =
+        FindSellInventoryButton()
+
+    if existingButton then
+
+        SellLog("Sell menu already open")
+
+        local clicked =
+            PressButton(existingButton)
+
+        task.wait(0.5)
+
+        Selling = false
+
+        return clicked
+    end
+
+    --==========================================================
+    -- FIND STEVEN
+    --==========================================================
+
+    local prompt =
+        FindStevenPrompt()
+
+    if not prompt then
+
+        Selling = false
+
+        warn(
+            "[AXIOM SELL] Không tìm thấy Steven / Sell Stand"
+        )
+
+        return false
+    end
+
+    local position =
+        GetPosition(prompt)
+
+    if not position then
+
+        Selling = false
+
+        warn(
+            "[AXIOM SELL] Không lấy được vị trí Steven"
+        )
+
+        return false
+    end
+
+    --==========================================================
+    -- SAVE POSITION
+    --==========================================================
+
+    local oldCFrame =
+        root.CFrame
+
+    --==========================================================
+    -- TELEPORT TO STEVEN
+    --==========================================================
+
+    SellLog("Teleport -> Steven")
+
+    root.CFrame =
+        CFrame.new(
+            position + Vector3.new(0, 3, 3)
+        )
+
+    task.wait(0.5)
+
+    --==========================================================
+    -- OPEN SELL MENU
+    --==========================================================
+
+    SellLog("Opening sell menu")
+
+    TriggerPrompt(prompt)
+
+    --==========================================================
+    -- WAIT SELL INVENTORY
+    --==========================================================
+
+    local button =
+        WaitForSellButton(4)
+
+    if not button then
+
+        -- đôi khi prompt đầu tiên chưa nhận
+        SellLog("Retry Steven prompt")
+
+        TriggerPrompt(prompt)
+
+        button =
+            WaitForSellButton(3)
+    end
+
+    --==========================================================
+    -- CLICK SELL INVENTORY
+    --==========================================================
+
+    local sold = false
+
+    if button then
+
+        SellLog("Click -> Sell Inventory")
+
+        sold =
+            PressButton(button)
+
+        task.wait(1)
+
+    else
+
+        warn(
+            "[AXIOM SELL] Menu mở nhưng không tìm thấy nút Sell Inventory"
+        )
+    end
+
+    --==========================================================
+    -- RETURN TO FARM
+    --==========================================================
+
+    if root
+        and root.Parent
+        and oldCFrame then
+
+        root.CFrame =
+            oldCFrame
+    end
+
+    Selling = false
+
+    if sold then
+        SellLog("SELL COMPLETE")
+    else
+        SellLog("SELL FAILED")
+    end
+
+    return sold
+end
+
+--==============================================================
+-- MANUAL TEST
+--
+-- chạy:
+--
+-- AXIOM_SellNow()
+--
+--==============================================================
+
+getgenv().AXIOM_SellNow = function()
+
+    task.spawn(function()
+        SellAll()
+    end)
+
+end
+
+--==============================================================
+-- AUTO SELL
+--==============================================================
+
+local AUTO_SELL = true
+
+local SELL_EVERY =
+    45
+
+task.spawn(function()
+
+    while task.wait(SELL_EVERY) do
+
+        if AUTO_SELL then
+
+            pcall(function()
+                SellAll()
+            end)
+
+        end
     end
 
 end)
 
--- ============================================================
--- CHARACTER RESPAWN
--- ============================================================
+print(
+    "[AXIOM] Auto Sell V2 loaded"
+)
 
-LocalPlayer.CharacterAdded:Connect(function()
-
-    task.wait(3)
-
-    pcall(function()
-
-        if setfpscap then
-            setfpscap(CONFIG.FPS_CAP)
-        end
-
-    end)
-
-end)
-
-print("[AXIOM] Performance Optimizer loaded.")
+print(
+    "[AXIOM] Test: AXIOM_SellNow()"
+)
