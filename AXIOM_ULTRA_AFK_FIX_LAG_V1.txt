@@ -1,0 +1,647 @@
+-- ============================================================
+-- AXIOM ULTRA AFK FIX LAG V1
+-- 4+ Roblox Clients / Mobile / CloudPhone / PC
+--
+-- MỤC TIÊU:
+--   CPU  : giảm mạnh
+--   GPU  : giảm cực mạnh
+--   RAM  : giảm phần graphics/assets nhiều nhất có thể
+--
+-- KHÔNG:
+--   - Xóa BasePart
+--   - Tắt CanTouch
+--   - Tắt CanQuery
+--   - Tắt CanCollide
+-- => hạn chế phá Auto Farm
+-- ============================================================
+
+local ENV = (getgenv and getgenv()) or _G
+
+if ENV.AXIOM_ULTRA_AFK_FIXLAG then
+    warn("[AXIOM] Fix Lag đã chạy rồi.")
+    return
+end
+
+ENV.AXIOM_ULTRA_AFK_FIXLAG = true
+
+
+-- ============================================================
+-- CONFIG
+-- ============================================================
+
+-- 5 = cực nhẹ
+-- Nếu farm phản ứng quá chậm -> đổi 8 hoặc 10
+local TARGET_FPS = 5
+
+-- Giấu toàn bộ thế giới 3D nhưng KHÔNG xóa Part
+local HIDE_3D_WORLD = true
+
+-- Khóa camera ra khỏi map
+-- Giảm render rất mạnh
+local LOCK_CAMERA = true
+
+-- Xóa texture/effect LOCAL để tiết kiệm thêm RAM
+local AGGRESSIVE_RAM = true
+
+-- Tắt BillboardGui / SurfaceGui trong thế giới
+-- ScreenGui menu/executor vẫn giữ nguyên
+local DISABLE_WORLD_GUI = true
+
+-- Tắt âm thanh
+local DISABLE_SOUND = true
+
+-- Số object xử lý rồi nghỉ một nhịp
+local BATCH_SIZE = 300
+
+
+-- ============================================================
+-- SERVICES
+-- ============================================================
+
+local Players =
+    game:GetService("Players")
+
+local Workspace =
+    game:GetService("Workspace")
+
+local Lighting =
+    game:GetService("Lighting")
+
+local SoundService =
+    game:GetService("SoundService")
+
+local RunService =
+    game:GetService("RunService")
+
+
+local LocalPlayer =
+    Players.LocalPlayer
+
+
+-- ============================================================
+-- FPS
+-- ============================================================
+
+pcall(function()
+
+    if setfpscap then
+        setfpscap(TARGET_FPS)
+    end
+
+end)
+
+
+-- ============================================================
+-- ROBLOX GRAPHICS QUALITY
+-- ============================================================
+
+pcall(function()
+
+    settings().Rendering.QualityLevel =
+        Enum.QualityLevel.Level01
+
+end)
+
+
+-- ============================================================
+-- LIGHTING
+-- ============================================================
+
+local function optimizeLighting()
+
+    pcall(function()
+        Lighting.GlobalShadows = false
+    end)
+
+    pcall(function()
+        Lighting.EnvironmentDiffuseScale = 0
+    end)
+
+    pcall(function()
+        Lighting.EnvironmentSpecularScale = 0
+    end)
+
+    pcall(function()
+        Lighting.Brightness = 0
+    end)
+
+    pcall(function()
+        Lighting.FogStart = 0
+        Lighting.FogEnd = 100
+    end)
+
+end
+
+optimizeLighting()
+
+
+-- ============================================================
+-- TERRAIN
+-- ============================================================
+
+pcall(function()
+
+    local Terrain =
+        Workspace:FindFirstChildOfClass("Terrain")
+
+    if Terrain then
+
+        pcall(function()
+            Terrain.Decoration = false
+        end)
+
+        pcall(function()
+            Terrain.WaterWaveSize = 0
+            Terrain.WaterWaveSpeed = 0
+            Terrain.WaterReflectance = 0
+        end)
+
+    end
+
+end)
+
+
+-- ============================================================
+-- CAMERA BLACK-VOID MODE
+-- ============================================================
+
+local function optimizeCamera()
+
+    if not LOCK_CAMERA then
+        return
+    end
+
+    local Camera =
+        Workspace.CurrentCamera
+
+    if not Camera then
+        return
+    end
+
+    pcall(function()
+
+        Camera.CameraType =
+            Enum.CameraType.Scriptable
+
+        Camera.FieldOfView = 1
+
+        Camera.CFrame =
+            CFrame.new(
+                0,
+                1000000,
+                0
+            )
+
+        Camera.Focus =
+            Camera.CFrame
+
+    end)
+
+end
+
+optimizeCamera()
+
+
+-- CameraModule đôi lúc giành lại camera
+-- Chỉ kiểm tra vài giây/lần, KHÔNG RenderStepped.
+
+task.spawn(function()
+
+    while ENV.AXIOM_ULTRA_AFK_FIXLAG do
+
+        optimizeCamera()
+
+        task.wait(5)
+
+    end
+
+end)
+
+
+-- ============================================================
+-- OBJECT OPTIMIZER
+-- ============================================================
+
+local function optimizeObject(obj)
+
+    if not obj then
+        return
+    end
+
+
+    -- ========================================================
+    -- PART / MESHPART
+    -- ========================================================
+
+    if obj:IsA("BasePart") then
+
+        pcall(function()
+            obj.CastShadow = false
+        end)
+
+        pcall(function()
+            obj.Reflectance = 0
+        end)
+
+
+        -- Quan trọng:
+        -- chỉ giấu LOCAL chứ không Destroy Part.
+        --
+        -- Farm vẫn có thể:
+        --   FindFirstChild
+        --   CFrame
+        --   Touch
+        --   Raycast
+        --   Remote
+        --
+        -- như bình thường.
+
+        if HIDE_3D_WORLD then
+
+            pcall(function()
+                obj.LocalTransparencyModifier = 1
+            end)
+
+        end
+
+
+        if obj:IsA("MeshPart") then
+
+            pcall(function()
+
+                obj.RenderFidelity =
+                    Enum.RenderFidelity.Performance
+
+            end)
+
+
+            if AGGRESSIVE_RAM then
+
+                pcall(function()
+                    obj.TextureID = ""
+                end)
+
+            end
+
+        end
+
+
+        return
+    end
+
+
+    -- ========================================================
+    -- TEXTURES
+    -- ========================================================
+
+    if obj:IsA("Decal")
+    or obj:IsA("Texture")
+    or obj:IsA("SurfaceAppearance") then
+
+        if AGGRESSIVE_RAM then
+
+            pcall(function()
+                obj:Destroy()
+            end)
+
+        else
+
+            pcall(function()
+                obj.Transparency = 1
+            end)
+
+        end
+
+        return
+    end
+
+
+    -- ========================================================
+    -- SPECIAL MESH
+    -- ========================================================
+
+    if obj:IsA("SpecialMesh") then
+
+        if AGGRESSIVE_RAM then
+
+            pcall(function()
+                obj:Destroy()
+            end)
+
+        else
+
+            pcall(function()
+                obj.TextureId = ""
+            end)
+
+        end
+
+        return
+    end
+
+
+    -- ========================================================
+    -- PARTICLES
+    -- ========================================================
+
+    if obj:IsA("ParticleEmitter") then
+
+        pcall(function()
+            obj.Enabled = false
+        end)
+
+        pcall(function()
+            obj:Clear()
+        end)
+
+        if AGGRESSIVE_RAM then
+
+            pcall(function()
+                obj:Destroy()
+            end)
+
+        end
+
+        return
+    end
+
+
+    -- ========================================================
+    -- TRAIL / BEAM
+    -- ========================================================
+
+    if obj:IsA("Trail")
+    or obj:IsA("Beam") then
+
+        pcall(function()
+            obj.Enabled = false
+        end)
+
+        if AGGRESSIVE_RAM then
+
+            pcall(function()
+                obj:Destroy()
+            end)
+
+        end
+
+        return
+    end
+
+
+    -- ========================================================
+    -- FIRE / SMOKE / SPARKLES
+    -- ========================================================
+
+    if obj:IsA("Fire")
+    or obj:IsA("Smoke")
+    or obj:IsA("Sparkles") then
+
+        pcall(function()
+            obj.Enabled = false
+        end)
+
+        if AGGRESSIVE_RAM then
+
+            pcall(function()
+                obj:Destroy()
+            end)
+
+        end
+
+        return
+    end
+
+
+    -- ========================================================
+    -- LIGHT
+    -- ========================================================
+
+    if obj:IsA("Light") then
+
+        pcall(function()
+            obj.Enabled = false
+        end)
+
+        pcall(function()
+            obj.Shadows = false
+        end)
+
+        return
+    end
+
+
+    -- ========================================================
+    -- WORLD GUI
+    -- ========================================================
+
+    if DISABLE_WORLD_GUI then
+
+        if obj:IsA("BillboardGui")
+        or obj:IsA("SurfaceGui") then
+
+            pcall(function()
+                obj.Enabled = false
+            end)
+
+            return
+        end
+
+    end
+
+
+    -- ========================================================
+    -- HIGHLIGHT
+    -- ========================================================
+
+    if obj:IsA("Highlight") then
+
+        pcall(function()
+            obj.Enabled = false
+        end)
+
+        return
+    end
+
+
+    -- ========================================================
+    -- SOUND
+    -- ========================================================
+
+    if DISABLE_SOUND
+    and obj:IsA("Sound") then
+
+        pcall(function()
+            obj.Volume = 0
+        end)
+
+        pcall(function()
+            obj:Stop()
+        end)
+
+        return
+    end
+
+end
+
+
+-- ============================================================
+-- LIGHTING EFFECT REMOVER
+-- ============================================================
+
+local function optimizeLightingObject(obj)
+
+    if not obj then
+        return
+    end
+
+    if obj:IsA("PostEffect")
+    or obj:IsA("Atmosphere")
+    or obj:IsA("Sky") then
+
+        pcall(function()
+            obj:Destroy()
+        end)
+
+    end
+
+end
+
+
+-- ============================================================
+-- FIRST SCAN
+-- ============================================================
+
+task.spawn(function()
+
+    print(
+        "[AXIOM] Đang tối ưu Workspace..."
+    )
+
+
+    local descendants =
+        Workspace:GetDescendants()
+
+
+    local processed = 0
+
+
+    for i = 1, #descendants do
+
+        optimizeObject(
+            descendants[i]
+        )
+
+        processed += 1
+
+
+        if processed >= BATCH_SIZE then
+
+            processed = 0
+
+            task.wait()
+
+        end
+
+    end
+
+
+    descendants = nil
+
+
+    -- Lighting
+
+    for _, obj in ipairs(
+        Lighting:GetChildren()
+    ) do
+
+        optimizeLightingObject(obj)
+
+    end
+
+
+    -- SoundService
+
+    if DISABLE_SOUND then
+
+        pcall(function()
+            SoundService.Volume = 0
+        end)
+
+
+        local sounds =
+            SoundService:GetDescendants()
+
+
+        for _, obj in ipairs(sounds) do
+            optimizeObject(obj)
+        end
+
+
+        sounds = nil
+
+    end
+
+
+    print(
+        "[AXIOM] ULTRA AFK FIX LAG READY"
+    )
+
+end)
+
+
+-- ============================================================
+-- OPTIMIZE NEW OBJECTS
+-- ============================================================
+
+Workspace.DescendantAdded:Connect(
+    function(obj)
+
+        task.defer(
+            optimizeObject,
+            obj
+        )
+
+    end
+)
+
+
+Lighting.ChildAdded:Connect(
+    function(obj)
+
+        task.defer(
+            optimizeLightingObject,
+            obj
+        )
+
+    end
+)
+
+
+if DISABLE_SOUND then
+
+    SoundService.DescendantAdded:Connect(
+        function(obj)
+
+            task.defer(
+                optimizeObject,
+                obj
+            )
+
+        end
+    )
+
+end
+
+
+-- ============================================================
+-- FINAL
+-- ============================================================
+
+print("================================")
+print(" AXIOM ULTRA AFK FIX LAG")
+print(" FPS:", TARGET_FPS)
+print(" Hide 3D:", HIDE_3D_WORLD)
+print(" Camera Lock:", LOCK_CAMERA)
+print(" Aggressive RAM:", AGGRESSIVE_RAM)
+print("================================")
