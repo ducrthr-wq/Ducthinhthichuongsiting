@@ -1,0 +1,256 @@
+-- ============================================================
+-- AXIOM FIX LAG V3 - HARVEST SAFE
+-- Fix lỗi một vài acc bật fix lag xong không thu hoạch được trái.
+--
+-- Nguyên tắc V3:
+--   * KHÔNG khóa camera
+--   * KHÔNG ẩn BasePart / trái / cây
+--   * KHÔNG Destroy object trong Workspace
+--   * KHÔNG đụng CanTouch / CanQuery / CanCollide
+--   * KHÔNG đụng Tool / Prompt / ClickDetector / TouchTransmitter
+--   * Chỉ giảm FPS, shadow, post effect, particle, light, sound
+-- => giảm lag ít hơn bản cực đoan nhưng tương thích farm cao hơn nhiều.
+-- ============================================================
+
+local ENV = (getgenv and getgenv()) or _G
+
+if ENV.AXIOM_HARVEST_SAFE_V3 then
+    warn("[AXIOM] HARVEST SAFE V3 đã chạy rồi")
+    return
+end
+ENV.AXIOM_HARVEST_SAFE_V3 = true
+
+-- ============================================================
+-- CONFIG
+-- ============================================================
+
+local TARGET_FPS = 15 -- nếu farm vẫn chậm, đổi thành 20
+local DISABLE_PARTICLES = true
+local DISABLE_LIGHTS = true
+local DISABLE_SOUNDS = true
+local BATCH_SIZE = 250
+
+-- ============================================================
+-- SERVICES
+-- ============================================================
+
+local Workspace = game:GetService("Workspace")
+local Lighting = game:GetService("Lighting")
+local SoundService = game:GetService("SoundService")
+
+-- ============================================================
+-- FPS / QUALITY
+-- ============================================================
+
+pcall(function()
+    if setfpscap then
+        setfpscap(TARGET_FPS)
+    end
+end)
+
+pcall(function()
+    settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
+end)
+
+-- ============================================================
+-- LIGHTING - chỉ chỉnh đồ họa, không xóa object
+-- ============================================================
+
+pcall(function()
+    Lighting.GlobalShadows = false
+    Lighting.EnvironmentDiffuseScale = 0
+    Lighting.EnvironmentSpecularScale = 0
+end)
+
+local function optimizeLighting(obj)
+    if obj:IsA("PostEffect") then
+        pcall(function()
+            obj.Enabled = false
+        end)
+        return
+    end
+
+    if obj:IsA("Atmosphere") then
+        pcall(function()
+            obj.Density = 0
+            obj.Haze = 0
+            obj.Glare = 0
+        end)
+    end
+end
+
+for _, obj in ipairs(Lighting:GetChildren()) do
+    optimizeLighting(obj)
+end
+
+Lighting.ChildAdded:Connect(function(obj)
+    task.defer(optimizeLighting, obj)
+end)
+
+-- ============================================================
+-- TERRAIN
+-- ============================================================
+
+pcall(function()
+    local terrain = Workspace:FindFirstChildOfClass("Terrain")
+    if terrain then
+        terrain.Decoration = false
+        terrain.WaterWaveSize = 0
+        terrain.WaterWaveSpeed = 0
+        terrain.WaterReflectance = 0
+    end
+end)
+
+-- ============================================================
+-- FARM CRITICAL CHECK
+-- Bất cứ thứ gì liên quan tương tác/farm đều bỏ qua hoàn toàn.
+-- ============================================================
+
+local function isFarmCritical(obj)
+    if not obj then
+        return true
+    end
+
+    if obj:IsA("Tool")
+    or obj:IsA("Humanoid")
+    or obj:IsA("Animator")
+    or obj:IsA("Animation")
+    or obj:IsA("Motor6D")
+    or obj:IsA("ProximityPrompt")
+    or obj:IsA("ClickDetector")
+    or obj:IsA("TouchTransmitter")
+    or obj:IsA("RemoteEvent")
+    or obj:IsA("RemoteFunction")
+    or obj:IsA("BindableEvent")
+    or obj:IsA("BindableFunction") then
+        return true
+    end
+
+    if obj:FindFirstAncestorOfClass("Tool") then
+        return true
+    end
+
+    return false
+end
+
+-- ============================================================
+-- SAFE OPTIMIZER
+-- KHÔNG thay Transparency / LocalTransparencyModifier.
+-- Đây là điểm fix chính cho lỗi không thu hoạch ở vài acc.
+-- ============================================================
+
+local function optimizeObject(obj)
+    if not obj or isFarmCritical(obj) then
+        return
+    end
+
+    if obj:IsA("BasePart") then
+        pcall(function()
+            obj.CastShadow = false
+            obj.Reflectance = 0
+        end)
+
+        if obj:IsA("MeshPart") then
+            pcall(function()
+                obj.RenderFidelity = Enum.RenderFidelity.Performance
+            end)
+        end
+        return
+    end
+
+    if DISABLE_PARTICLES then
+        if obj:IsA("ParticleEmitter") then
+            pcall(function()
+                obj.Enabled = false
+                obj:Clear()
+            end)
+            return
+        end
+
+        if obj:IsA("Trail")
+        or obj:IsA("Beam")
+        or obj:IsA("Fire")
+        or obj:IsA("Smoke")
+        or obj:IsA("Sparkles") then
+            pcall(function()
+                obj.Enabled = false
+            end)
+            return
+        end
+    end
+
+    if DISABLE_LIGHTS and obj:IsA("Light") then
+        pcall(function()
+            obj.Enabled = false
+            obj.Shadows = false
+        end)
+        return
+    end
+
+    if obj:IsA("Highlight") then
+        pcall(function()
+            obj.Enabled = false
+        end)
+        return
+    end
+
+    if DISABLE_SOUNDS and obj:IsA("Sound") then
+        pcall(function()
+            obj.Volume = 0
+            obj:Stop()
+        end)
+        return
+    end
+end
+
+-- ============================================================
+-- INITIAL SCAN
+-- ============================================================
+
+task.spawn(function()
+    print("[AXIOM] HARVEST SAFE: optimizing...")
+
+    local objects = Workspace:GetDescendants()
+    local n = 0
+
+    for i = 1, #objects do
+        optimizeObject(objects[i])
+        n += 1
+
+        if n >= BATCH_SIZE then
+            n = 0
+            task.wait()
+        end
+    end
+
+    objects = nil
+
+    if DISABLE_SOUNDS then
+        pcall(function()
+            SoundService.Volume = 0
+        end)
+    end
+
+    print("[AXIOM] HARVEST SAFE V3 READY")
+end)
+
+-- ============================================================
+-- NEW OBJECTS
+-- Delay nhẹ để trái/cây spawn đủ component rồi mới optimize effect.
+-- ============================================================
+
+Workspace.DescendantAdded:Connect(function(obj)
+    task.defer(function()
+        task.wait(0.2)
+        optimizeObject(obj)
+    end)
+end)
+
+print("========================================")
+print(" AXIOM FIX LAG V3 - HARVEST SAFE")
+print(" FPS:", TARGET_FPS)
+print(" Camera: untouched")
+print(" Parts/Fruits: NOT HIDDEN")
+print(" Interaction: untouched")
+print(" Destroy workspace objects: NO")
+print("========================================")
